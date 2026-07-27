@@ -1,0 +1,218 @@
+<!-- ============================================================
+     popup.html
+     ------------------------------------------------------------
+     Petite fenêtre qui s'affiche quand on clique sur l'icône de
+     l'extension dans la barre d'outils Chrome. Elle contient le
+     réglage "saut automatique" et la liste des marquages manuels
+     (AniSkip n'est plus persisté ici, seulement en mémoire côté
+     page — donc cette liste ne montre que ce que tu as marqué
+     toi-même).
+     ============================================================ -->
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+  <meta charset="UTF-8" />
+  <title>Anime Skip Intro</title>
+  <style>
+    * {
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: Arial, Helvetica, sans-serif;
+      width: 340px;
+      padding: 14px;
+      background-color: #17171b;
+      color: #f0f0f0;
+    }
+
+    h1 {
+      font-size: 15px;
+      font-weight: 700;
+      margin: 0 0 12px 0;
+      display: flex;
+      align-items: center;
+      gap: 6px;
+    }
+
+    h2 {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: #888;
+      margin: 14px 0 8px 0;
+    }
+
+    /* --- Bloc réglages --- */
+    #bloc-parametres {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      background-color: #22222a;
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      border-radius: 10px;
+      padding: 10px 12px;
+    }
+
+    #bloc-parametres label {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 12.5px;
+      cursor: pointer;
+      width: 100%;
+    }
+
+    /* --- Toggle switch (même style que le panneau sur la page) --- */
+    #case-auto-skip {
+      position: absolute;
+      opacity: 0;
+      width: 0;
+      height: 0;
+    }
+
+    .switch-slider {
+      position: relative;
+      flex-shrink: 0;
+      width: 34px;
+      height: 19px;
+      background-color: rgba(255, 255, 255, 0.18);
+      border-radius: 999px;
+      transition: background-color 0.15s ease;
+    }
+
+    .switch-slider::before {
+      content: "";
+      position: absolute;
+      top: 2px;
+      left: 2px;
+      width: 15px;
+      height: 15px;
+      background-color: #ffffff;
+      border-radius: 50%;
+      transition: transform 0.15s ease;
+    }
+
+    #case-auto-skip:checked + .switch-slider {
+      background-color: #3b9ef0;
+    }
+
+    #case-auto-skip:checked + .switch-slider::before {
+      transform: translateX(15px);
+    }
+
+    /* --- Liste des marquages manuels --- */
+    #liste-series {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      max-height: 300px;
+      overflow-y: auto;
+    }
+
+    .carte-serie {
+      background-color: #22222a;
+      border: 1px solid rgba(255, 255, 255, 0.06);
+      border-radius: 10px;
+      padding: 10px;
+    }
+
+    .carte-serie .nom-serie {
+      font-weight: 700;
+      font-size: 13px;
+      margin-bottom: 4px;
+      word-break: break-word;
+    }
+
+    .badge-source {
+      display: inline-block;
+      font-size: 10px;
+      font-weight: 700;
+      color: #ffc266;
+      background-color: rgba(240, 173, 59, 0.16);
+      border: 1px solid rgba(240, 173, 59, 0.4);
+      border-radius: 999px;
+      padding: 2px 8px;
+      margin-bottom: 8px;
+    }
+
+    .carte-serie label {
+      font-size: 11.5px;
+      color: #aaa;
+      display: block;
+      margin-top: 6px;
+    }
+
+    .carte-serie input[type="number"] {
+      width: 100%;
+      padding: 5px 6px;
+      margin-top: 3px;
+      background-color: #17171b;
+      color: #f0f0f0;
+      border: 1px solid #3a3a42;
+      border-radius: 6px;
+      font-size: 12px;
+    }
+
+    .actions-serie {
+      display: flex;
+      gap: 6px;
+      margin-top: 9px;
+    }
+
+    .actions-serie button {
+      flex: 1;
+      cursor: pointer;
+      border: none;
+      border-radius: 6px;
+      padding: 6px;
+      font-size: 12px;
+      font-weight: 600;
+      transition: opacity 0.12s ease;
+    }
+
+    .actions-serie button:hover {
+      opacity: 0.85;
+    }
+
+    .bouton-sauvegarder {
+      background-color: #2e7d32;
+      color: white;
+    }
+
+    .bouton-supprimer {
+      background-color: #c62828;
+      color: white;
+    }
+
+    #message-vide {
+      font-size: 12.5px;
+      color: #999;
+      line-height: 1.4;
+    }
+  </style>
+</head>
+<body>
+  <h1>🎬 Anime Skip Intro</h1>
+
+  <div id="bloc-parametres">
+    <label for="case-auto-skip">
+      <input type="checkbox" id="case-auto-skip" />
+      <span class="switch-slider"></span>
+      <span>Saut automatique (AniSkip + marquage manuel)</span>
+    </label>
+  </div>
+
+  <h2>Marquages manuels enregistrés</h2>
+  <div id="liste-series"></div>
+  <p id="message-vide" style="display:none;">
+    Aucun marquage manuel pour l'instant. Les timings AniSkip ne sont
+    pas listés ici (ils ne sont pas sauvegardés — AniSkip a déjà cette
+    donnée). Va sur un épisode où AniSkip n'a rien et clique sur
+    "Marquer fin d'intro" pour en ajouter un.
+  </p>
+
+  <script src="popup.js"></script>
+</body>
+</html>

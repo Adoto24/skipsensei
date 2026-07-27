@@ -1,0 +1,43 @@
+{
+  "manifest_version": 3,
+  "name": "Anime Skip Intro",
+  "version": "1.0.0",
+  "description": "Ajoute un bouton flottant pour sauter l'intro des animes sur un site de streaming.",
+
+  "permissions": ["storage"],
+  "host_permissions": [
+    "https://api.jikan.moe/*",
+    "https://api.aniskip.com/*",
+    "https://graphql.anilist.co/*"
+  ],
+
+  "content_scripts": [
+    {
+      "matches": [
+        "*://anime-sama.to/*",
+        "*://*.anime-sama.to/*",
+        "*://voiranime.rip/*",
+        "*://*.voiranime.rip/*"
+      ],
+      "js": ["content.js"],
+      "css": ["content.css"],
+      "run_at": "document_idle"
+    },
+    {
+      "matches": [
+        "*://vidmoly.to/*",
+        "*://vidmoly.biz/*",
+        "*://video.sibnet.ru/*",
+        "*://sendvid.com/*"
+      ],
+      "all_frames": true,
+      "js": ["player-frame.js"],
+      "run_at": "document_idle"
+    }
+  ],
+
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Anime Skip Intro"
+  }
+}
