@@ -1,217 +1,375 @@
-<!-- ============================================================
-     popup.html
-     ------------------------------------------------------------
-     Petite fenêtre qui s'affiche quand on clique sur l'icône de
-     l'extension dans la barre d'outils Chrome. Elle contient le
-     réglage "saut automatique" et la liste des marquages manuels
-     (AniSkip n'est plus persisté ici, seulement en mémoire côté
-     page — donc cette liste ne montre que ce que tu as marqué
-     toi-même).
-     ============================================================ -->
 <!DOCTYPE html>
-<html lang="fr">
+<html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <title>Anime Skip Intro</title>
-  <style>
-    * {
-      box-sizing: border-box;
-    }
-
-    body {
-      font-family: Arial, Helvetica, sans-serif;
-      width: 340px;
-      padding: 14px;
-      background-color: #17171b;
-      color: #f0f0f0;
-    }
-
-    h1 {
-      font-size: 15px;
-      font-weight: 700;
-      margin: 0 0 12px 0;
-      display: flex;
-      align-items: center;
-      gap: 6px;
-    }
-
-    h2 {
-      font-size: 11px;
-      font-weight: 700;
-      letter-spacing: 0.04em;
-      text-transform: uppercase;
-      color: #888;
-      margin: 14px 0 8px 0;
-    }
-
-    /* --- Bloc réglages --- */
-    #bloc-parametres {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      background-color: #22222a;
-      border: 1px solid rgba(255, 255, 255, 0.06);
-      border-radius: 10px;
-      padding: 10px 12px;
-    }
-
-    #bloc-parametres label {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      font-size: 12.5px;
-      cursor: pointer;
-      width: 100%;
-    }
-
-    /* --- Toggle switch (même style que le panneau sur la page) --- */
-    #case-auto-skip {
-      position: absolute;
-      opacity: 0;
-      width: 0;
-      height: 0;
-    }
-
-    .switch-slider {
-      position: relative;
-      flex-shrink: 0;
-      width: 34px;
-      height: 19px;
-      background-color: rgba(255, 255, 255, 0.18);
-      border-radius: 999px;
-      transition: background-color 0.15s ease;
-    }
-
-    .switch-slider::before {
-      content: "";
-      position: absolute;
-      top: 2px;
-      left: 2px;
-      width: 15px;
-      height: 15px;
-      background-color: #ffffff;
-      border-radius: 50%;
-      transition: transform 0.15s ease;
-    }
-
-    #case-auto-skip:checked + .switch-slider {
-      background-color: #3b9ef0;
-    }
-
-    #case-auto-skip:checked + .switch-slider::before {
-      transform: translateX(15px);
-    }
-
-    /* --- Liste des marquages manuels --- */
-    #liste-series {
-      display: flex;
-      flex-direction: column;
-      gap: 8px;
-      max-height: 300px;
-      overflow-y: auto;
-    }
-
-    .carte-serie {
-      background-color: #22222a;
-      border: 1px solid rgba(255, 255, 255, 0.06);
-      border-radius: 10px;
-      padding: 10px;
-    }
-
-    .carte-serie .nom-serie {
-      font-weight: 700;
-      font-size: 13px;
-      margin-bottom: 4px;
-      word-break: break-word;
-    }
-
-    .badge-source {
-      display: inline-block;
-      font-size: 10px;
-      font-weight: 700;
-      color: #ffc266;
-      background-color: rgba(240, 173, 59, 0.16);
-      border: 1px solid rgba(240, 173, 59, 0.4);
-      border-radius: 999px;
-      padding: 2px 8px;
-      margin-bottom: 8px;
-    }
-
-    .carte-serie label {
-      font-size: 11.5px;
-      color: #aaa;
-      display: block;
-      margin-top: 6px;
-    }
-
-    .carte-serie input[type="number"] {
-      width: 100%;
-      padding: 5px 6px;
-      margin-top: 3px;
-      background-color: #17171b;
-      color: #f0f0f0;
-      border: 1px solid #3a3a42;
-      border-radius: 6px;
-      font-size: 12px;
-    }
-
-    .actions-serie {
-      display: flex;
-      gap: 6px;
-      margin-top: 9px;
-    }
-
-    .actions-serie button {
-      flex: 1;
-      cursor: pointer;
-      border: none;
-      border-radius: 6px;
-      padding: 6px;
-      font-size: 12px;
-      font-weight: 600;
-      transition: opacity 0.12s ease;
-    }
-
-    .actions-serie button:hover {
-      opacity: 0.85;
-    }
-
-    .bouton-sauvegarder {
-      background-color: #2e7d32;
-      color: white;
-    }
-
-    .bouton-supprimer {
-      background-color: #c62828;
-      color: white;
-    }
-
-    #message-vide {
-      font-size: 12.5px;
-      color: #999;
-      line-height: 1.4;
-    }
-  </style>
+  <meta name="color-scheme" content="dark" />
+  <title>SkipSensei</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Inter:ital,wght@0,400;0,500;0,600;0,700;0,800;1,700;1,800&display=swap"
+    rel="stylesheet"
+  />
+  <!-- Loaded as plain stylesheets (font-src), not the @phosphor-icons/web
+       loader script: MV3 extension pages have a fixed default CSP of
+       "script-src 'self'; object-src 'self'" that can't be relaxed, so a
+       remote <script> here is silently blocked and every icon in the
+       popup ends up invisible. Stylesheets/fonts aren't restricted. -->
+  <link rel="stylesheet" href="https://unpkg.com/@phosphor-icons/web@2.1.1/src/regular/style.css" />
+  <link rel="stylesheet" href="https://unpkg.com/@phosphor-icons/web@2.1.1/src/fill/style.css" />
+  <link rel="stylesheet" href="popup.css" />
 </head>
 <body>
-  <h1>🎬 Anime Skip Intro</h1>
+  <div class="popup">
 
-  <div id="bloc-parametres">
-    <label for="case-auto-skip">
-      <input type="checkbox" id="case-auto-skip" />
-      <span class="switch-slider"></span>
-      <span>Saut automatique (AniSkip + marquage manuel)</span>
-    </label>
+    <!-- Header -->
+    <header class="header">
+      <div class="brand">
+        <i class="ph-fill ph-fast-forward brand-icon"></i>
+        <h1 class="brand-name"><span class="brand-white">Skip</span><span class="brand-accent">Sensei</span></h1>
+        <span class="version-pill" id="version-pill">—</span>
+      </div>
+      <div class="header-actions">
+        <button class="icon-btn" id="btn-settings" title="Settings" aria-label="Settings">
+          <i class="ph ph-gear"></i>
+        </button>
+        <button class="icon-btn" id="btn-theme" title="Toggle dark mode" aria-label="Toggle dark mode">
+          <i class="ph ph-moon"></i>
+        </button>
+        <button class="icon-btn" id="btn-support" title="Support SkipSensei" aria-label="Support SkipSensei">
+          <i class="ph ph-heart"></i>
+        </button>
+      </div>
+    </header>
+
+    <!-- Settings: full-panel swap, same mechanism as Manual Timings below -->
+    <div class="card view-detail" id="settings-panel" hidden>
+      <div class="view-detail-header">
+        <div class="view-detail-heading">
+          <p class="view-detail-title">Settings</p>
+          <p class="view-detail-subtitle">Everything SkipSensei actually lets you configure</p>
+        </div>
+        <button class="icon-btn" id="btn-close-settings" aria-label="Close settings">
+          <i class="ph ph-x"></i>
+        </button>
+      </div>
+
+      <div class="settings-scroll">
+
+        <section class="settings-category">
+          <div class="settings-category-header">
+            <i class="ph ph-play-circle"></i>
+            <span>Playback</span>
+          </div>
+          <div class="settings-row-toggle">
+            <div class="settings-row-text">
+              <p class="settings-row-title">Auto Skip Intro</p>
+              <p class="settings-row-desc">Automatically jump past the opening once it's detected.</p>
+            </div>
+            <button class="toggle-switch" id="toggle-autoskip-settings" role="switch" aria-checked="false" aria-label="Toggle Auto Skip Intro">
+              <span class="toggle-knob"></span>
+            </button>
+          </div>
+        </section>
+
+        <section class="settings-category">
+          <div class="settings-category-header">
+            <i class="ph ph-radar"></i>
+            <span>Detection</span>
+          </div>
+          <p class="settings-row-desc settings-static-desc">
+            SkipSensei tries AniSkip first, then Open Anime Timestamps, then falls back to a manual mark you set on-page.
+          </p>
+          <div class="detection-last-match" id="detection-last-match" hidden>
+            <i class="ph-fill ph-check-circle"></i>
+            <span id="detection-last-match-text">—</span>
+          </div>
+        </section>
+
+        <section class="settings-category">
+          <div class="settings-category-header">
+            <i class="ph ph-palette"></i>
+            <span>Appearance</span>
+          </div>
+          <div class="settings-row-toggle">
+            <div class="settings-row-text">
+              <p class="settings-row-title">Dark Mode</p>
+              <p class="settings-row-desc">Same accent, flipped surface — synced with the header toggle.</p>
+            </div>
+            <button class="toggle-switch" id="toggle-theme-settings" role="switch" aria-checked="true" aria-label="Toggle dark mode">
+              <span class="toggle-knob"></span>
+            </button>
+          </div>
+        </section>
+
+        <section class="settings-category">
+          <div class="settings-category-header">
+            <i class="ph ph-globe"></i>
+            <span>Supported Sites</span>
+          </div>
+          <ul class="site-list" id="settings-site-list"></ul>
+        </section>
+
+        <section class="settings-category">
+          <div class="settings-category-header">
+            <i class="ph ph-wrench"></i>
+            <span>Advanced</span>
+          </div>
+          <button class="btn-settings-action" id="btn-reset-stats">
+            <i class="ph ph-arrow-counter-clockwise"></i>
+            <span>
+              <span class="btn-settings-action-title">Reset statistics</span>
+              <span class="btn-settings-action-desc">Clears stats, history, streaks and favorites — not manual timings.</span>
+            </span>
+          </button>
+          <button class="btn-settings-action" id="btn-clear-cache">
+            <i class="ph ph-broom"></i>
+            <span>
+              <span class="btn-settings-action-title">Clear resolution cache</span>
+              <span class="btn-settings-action-desc">Wipes cached MAL/AniDB matches — use if a series ever resolves wrong.</span>
+            </span>
+          </button>
+        </section>
+
+        <section class="settings-category" id="settings-about">
+          <div class="settings-category-header">
+            <i class="ph ph-info"></i>
+            <span>About</span>
+          </div>
+          <p class="settings-row">
+            <span>Version</span>
+            <span class="settings-value" id="settings-version-value">—</span>
+          </p>
+          <div class="support-card">
+            <i class="ph-fill ph-heart support-icon"></i>
+            <div>
+              <p class="support-title">Support SkipSensei</p>
+              <p class="support-desc">Donations aren't set up yet — this'll be the place, once they are.</p>
+            </div>
+          </div>
+        </section>
+
+      </div>
+    </div>
+
+    <!-- Manual Timings: full-panel swap, moved out of Settings -->
+    <div class="card view-detail" id="manual-timings-panel" hidden>
+      <div class="view-detail-header">
+        <div class="view-detail-heading">
+          <p class="view-detail-title">Manual Timings</p>
+          <p class="view-detail-subtitle">Intro end times you've saved by hand, per episode</p>
+        </div>
+        <button class="icon-btn" id="btn-close-manual-timings" aria-label="Close Manual Timings">
+          <i class="ph ph-x"></i>
+        </button>
+      </div>
+      <ul class="timing-list" id="saved-timings-list"></ul>
+      <div class="empty-state" id="saved-timings-empty" hidden>
+        <i class="ph ph-bookmark-simple empty-state-icon"></i>
+        <p class="empty-state-title">No manual timings yet</p>
+        <p class="empty-state-desc">Timings you save with "Mark Intro End" on-page will show up here, editable any time.</p>
+      </div>
+    </div>
+
+    <div class="view-panel" data-view-panel="dashboard">
+
+      <!-- Auto Skip Intro — the hero card -->
+      <section class="card autoskip-banner" id="autoskip-banner">
+        <div class="autoskip-left">
+          <span class="autoskip-icon-wrap">
+            <i class="ph-fill ph-fast-forward autoskip-icon"></i>
+          </span>
+          <div class="autoskip-text">
+            <p class="autoskip-title">Auto Skip Intro</p>
+            <p class="autoskip-subtitle">
+              <span class="status-dot" id="autoskip-status-dot"></span>
+              <span id="autoskip-subtitle-text">—</span>
+            </p>
+          </div>
+        </div>
+        <button class="toggle-switch toggle-switch-lg" id="toggle-autoskip" role="switch" aria-checked="false" aria-label="Toggle Auto Skip Intro">
+          <span class="toggle-knob"></span>
+        </button>
+      </section>
+
+      <!-- Currently Watching -->
+      <section class="card watch-card">
+        <div class="watch-skeleton" id="watch-skeleton">
+          <div class="skeleton skeleton-thumb"></div>
+          <div class="skeleton-lines">
+            <div class="skeleton skeleton-line" style="width: 70%"></div>
+            <div class="skeleton skeleton-line" style="width: 45%"></div>
+            <div class="skeleton skeleton-line" style="width: 55%"></div>
+          </div>
+        </div>
+
+        <div class="empty-state" id="watch-empty" hidden>
+          <i class="ph ph-play-circle empty-state-icon"></i>
+          <p class="empty-state-title">No anime detected</p>
+          <p class="empty-state-desc">Open a supported streaming site to begin.</p>
+        </div>
+
+        <div class="watch-content" id="watch-content" hidden>
+          <div class="watch-header">
+            <span class="watch-label">
+              <span class="status-dot" id="watch-status-dot"></span>
+              <span id="watch-status-label">—</span>
+            </span>
+            <span class="site-badge" id="watch-site" hidden></span>
+          </div>
+          <p class="watch-title" id="watch-title">—</p>
+          <div class="watch-meta">
+            <span class="watch-episode" id="watch-episode">—</span>
+            <span class="watch-language-chip" id="watch-language" hidden></span>
+          </div>
+          <div class="watch-timing" id="watch-timing" hidden>
+            <i class="ph ph-waveform"></i>
+            <span>Intro</span>
+            <span class="watch-timing-range" id="watch-timing-range">—</span>
+          </div>
+        </div>
+      </section>
+
+      <!-- Quick Actions -->
+      <section class="card tabs-card">
+        <button class="action-tab" data-tab="shortcuts">
+          <i class="ph ph-keyboard tab-icon"></i>
+          <span class="tab-label">Shortcuts</span>
+          <span class="tab-soon">Soon</span>
+          <i class="ph ph-caret-right tab-chevron"></i>
+        </button>
+        <button class="action-tab" id="tab-manual-timings">
+          <i class="ph ph-bookmark-simple tab-icon"></i>
+          <span class="tab-label">Manual Timings</span>
+          <i class="ph ph-caret-right tab-chevron"></i>
+        </button>
+        <button class="action-tab" data-tab="contribute">
+          <i class="ph ph-note-pencil tab-icon"></i>
+          <span class="tab-label">Contribute</span>
+          <span class="tab-soon">Soon</span>
+          <i class="ph ph-caret-right tab-chevron"></i>
+        </button>
+      </section>
+
+      <!-- Recently Skipped -->
+      <section class="card history-card">
+        <div class="history-header">
+          <div class="history-title">
+            <i class="ph ph-clock-counter-clockwise"></i>
+            <span>Recently Skipped</span>
+          </div>
+          <span class="today-chip" id="today-chip" hidden>
+            <i class="ph-fill ph-lightning"></i>
+            <span id="today-chip-text">—</span>
+          </span>
+        </div>
+
+        <ul class="history-list" id="history-list"></ul>
+        <div class="empty-state empty-state-compact" id="history-empty" hidden>
+          <i class="ph ph-fast-forward empty-state-icon"></i>
+          <p class="empty-state-title">Nothing skipped yet</p>
+          <p class="empty-state-desc">Watch an episode and SkipSensei will automatically record every skipped intro.</p>
+        </div>
+      </section>
+
+    </div>
+
+    <div class="view-panel" data-view-panel="stats" hidden>
+
+      <section class="card stats-hero">
+        <div class="stats-hero-data">
+          <div class="stat-block">
+            <p class="stat-label">Intros Skipped</p>
+            <p class="stat-value" id="stat-intros-skipped">0</p>
+            <p class="stat-caption">All time</p>
+          </div>
+          <div class="stat-divider"></div>
+          <div class="stat-block">
+            <p class="stat-label">Time Saved</p>
+            <p class="stat-value" id="stat-time-saved">0m</p>
+            <p class="stat-caption">All time</p>
+          </div>
+        </div>
+        <div class="stats-ring-wrap">
+          <div class="stats-ring" id="stats-ring" style="--ring-pct: 0">
+            <span class="stats-ring-value" id="stats-ring-value">0%</span>
+          </div>
+          <p class="stats-ring-label">This month vs. best month</p>
+        </div>
+      </section>
+
+      <section class="card stats-tiles">
+        <div class="stats-tile" id="tile-avg-length">
+          <i class="ph ph-hourglass-medium"></i>
+          <p class="stats-tile-value" id="tile-avg-length-value">—</p>
+          <p class="stats-tile-label">Avg. Intro Length</p>
+        </div>
+        <div class="stats-tile" id="tile-longest">
+          <i class="ph ph-trophy"></i>
+          <p class="stats-tile-value" id="tile-longest-value">—</p>
+          <p class="stats-tile-label" id="tile-longest-label">Longest Skip</p>
+        </div>
+        <div class="stats-tile" id="tile-fav-anime">
+          <i class="ph ph-star"></i>
+          <p class="stats-tile-value" id="tile-fav-anime-value">—</p>
+          <p class="stats-tile-label" id="tile-fav-anime-label">Favorite Anime</p>
+        </div>
+        <div class="stats-tile" id="tile-fav-site">
+          <i class="ph ph-globe-hemisphere-west"></i>
+          <p class="stats-tile-value" id="tile-fav-site-value">—</p>
+          <p class="stats-tile-label" id="tile-fav-site-label">Favorite Site</p>
+        </div>
+        <div class="stats-tile" id="tile-streak">
+          <i class="ph-fill ph-flame"></i>
+          <p class="stats-tile-value" id="tile-streak-value">—</p>
+          <p class="stats-tile-label">Current Streak</p>
+        </div>
+        <div class="stats-tile" id="tile-best-streak">
+          <i class="ph ph-medal"></i>
+          <p class="stats-tile-value" id="tile-best-streak-value">—</p>
+          <p class="stats-tile-label">Longest Streak</p>
+        </div>
+      </section>
+
+      <section class="card chart-card">
+        <div class="chart-header">
+          <span>Last 7 Days</span>
+        </div>
+        <div class="bar-chart" id="chart-week"></div>
+      </section>
+
+      <section class="card chart-card">
+        <div class="chart-header">
+          <span>Last 6 Months</span>
+        </div>
+        <div class="bar-chart" id="chart-months"></div>
+      </section>
+
+    </div>
+
+    <!-- Bottom navigation -->
+    <nav class="bottom-nav">
+      <button class="nav-item is-active" data-nav="dashboard">
+        <span class="nav-indicator"></span>
+        <i class="ph-fill ph-house"></i>
+        <span>Dashboard</span>
+      </button>
+      <button class="nav-item" data-nav="stats">
+        <span class="nav-indicator"></span>
+        <i class="ph ph-chart-bar"></i>
+        <span>Stats</span>
+      </button>
+    </nav>
+
+    <div class="toast" id="toast" hidden>
+      <i class="ph-fill ph-check-circle toast-icon" id="toast-icon"></i>
+      <span class="toast-text">
+        <span class="toast-title" id="toast-title">—</span>
+        <span class="toast-subtitle" id="toast-subtitle" hidden></span>
+      </span>
+    </div>
+
   </div>
-
-  <h2>Marquages manuels enregistrés</h2>
-  <div id="liste-series"></div>
-  <p id="message-vide" style="display:none;">
-    Aucun marquage manuel pour l'instant. Les timings AniSkip ne sont
-    pas listés ici (ils ne sont pas sauvegardés — AniSkip a déjà cette
-    donnée). Va sur un épisode où AniSkip n'a rien et clique sur
-    "Marquer fin d'intro" pour en ajouter un.
-  </p>
 
   <script src="popup.js"></script>
 </body>

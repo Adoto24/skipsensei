@@ -15,9 +15,11 @@
    Son rôle :
    - via l'adaptateur du site courant, trouver le nom de la série
      et le numéro d'épisode
-   - essayer de résoudre automatiquement les timings d'intro/ending
-     via AniSkip (Jikan/AniList pour trouver l'ID MyAnimeList, puis
-     AniSkip pour les timestamps), avec repli sur le marquage manuel
+   - essayer de résoudre automatiquement les timings d'intro/ending,
+     en cascade : AniSkip d'abord, puis Open Anime Timestamps
+     (Jikan/AniList pour trouver l'ID MyAnimeList, relations.yuna.moe
+     pour le convertir en ID AniDB), avec repli sur le marquage manuel
+     si aucune des deux sources n'a rien
    - afficher/gérer le panneau flottant
    - communiquer avec player-frame.js (qui tourne DANS l'iframe)
      via window.postMessage, puisqu'on ne peut pas accéder
@@ -25,7 +27,7 @@
    ============================================================ */
 
 if (window.__animeSkipIntroInjected) {
-  console.log("[Anime Skip Intro] Script déjà présent, on ne relance pas.");
+  console.log("[SkipSensei] Script déjà présent, on ne relance pas.");
 } else {
   window.__animeSkipIntroInjected = true;
 
@@ -33,56 +35,251 @@ if (window.__animeSkipIntroInjected) {
   // (et ignorer tous les autres messages qui pourraient circuler sur la page).
   const CANAL = "anime-skip-intro";
 
-  const INTERVALLE_VERIFICATION_MS = 2000;
+  // Safety-net poll only now (see the "change" listener + MutationObserver
+  // set up at the bottom of this file): most iframe/episode changes are
+  // caught immediately, so this just guards against anything that slips
+  // through (e.g. a site update that changes how episodes are switched).
+  const INTERVALLE_VERIFICATION_MS = 3000;
   const DELAI_REPONSE_IFRAME_MS = 1500;
+
+  // Domaines des lecteurs vidéo tiers connus (voir manifest.json, deuxième
+  // content_scripts). Utilisé pour préférer un iframe reconnu plutôt que le
+  // premier iframe trouvé sur la page, qui pourrait être une pub.
+  const DOMAINES_LECTEUR_CONNUS = ["vidmoly", "sibnet", "sendvid"];
 
   // ------------------------------------------------------------
   // AniSkip integration (new).
   // English comments below, as requested, for this new logic.
   // ------------------------------------------------------------
-  const ANISKIP_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
-  const FETCH_TIMEOUT_MS = 8000;
-  const JIKAN_SEARCH_URL = "https://api.jikan.moe/v4/anime";
+  // ANISKIP_CACHE_TTL_MS, FETCH_TIMEOUT_MS, JIKAN_SEARCH_URL and
+  // ANILIST_GRAPHQL_URL now live in resolution.js (see that file's header
+  // comment for why it's a plain shared-scope script, not an import).
   const ANISKIP_BASE_URL = "https://api.aniskip.com/v2/skip-times";
-  const ANILIST_GRAPHQL_URL = "https://graphql.anilist.co"; // fallback when Jikan search is down
+
+  // OVERRIDES_MALID moved to resolution.js (used only by resoudreMalId there).
+
+  // ------------------------------------------------------------
+  // Open Anime Timestamps (new, second auto-detection source, tried
+  // after AniSkip). Unlike AniSkip it's not an API but a static JSON
+  // dataset on GitHub, keyed by AniDB id — relations.yuna.moe converts
+  // the MAL id we already have into an AniDB id. It also only records
+  // where the opening *starts*, never where it ends, so the end is
+  // approximated with OAT_DUREE_OP_DEFAUT_S; less precise than AniSkip,
+  // which is why this is tried second, not first.
+  // ------------------------------------------------------------
+  const RELATIONS_YUNA_URL = "https://relations.yuna.moe/api/ids";
+  const OPEN_ANIME_TIMESTAMPS_URL =
+    "https://raw.githubusercontent.com/jonbarrow/open-anime-timestamps/master/timestamps.json";
+  const OAT_DUREE_OP_DEFAUT_S = 90; // typical anime OP length
+  const STORAGE_KEY_OAT_CACHE = "asi-oat-cache"; // the ~2MB dataset, cached instead of refetched every episode
 
   const STORAGE_PREFIX_TIMING = "asi-timing::"; // per series+episode
-  const STORAGE_PREFIX_MALID = "asi-malid::"; // per series (shared across episodes)
+  // STORAGE_PREFIX_MALID, STORAGE_PREFIX_SEQUEL_MALID and
+  // STORAGE_PREFIX_SAISONS moved to resolution.js (used only there).
   const STORAGE_KEY_SETTINGS = "asi-settings";
+  // Shared with player-frame.js — keep these two in sync if renamed there.
+  const STORAGE_KEY_STATS = "asi-stats"; // { "YYYY-MM": { skips, secondesGagnees } }
+  const STORAGE_KEY_HISTORY = "asi-history"; // [{ serie, episode, secondes, declencheur, horodatage, malId, site }, ...]
+  const HISTORIQUE_TAILLE_MAX = 20;
+  // Shared with player-frame.js — new (popup Stats page). Written by
+  // enregistrerActiviteEtRecords, one call per real skip (manual or auto),
+  // alongside the STATS/HISTORY writes above.
+  const STORAGE_KEY_ACTIVITY = "asi-activity"; // { "YYYY-MM-DD": { skips, secondesGagnees } }
+  const STORAGE_KEY_FAVORIS_SERIES = "asi-fav-series"; // { [serie]: skipCount }
+  const STORAGE_KEY_FAVORIS_SITES = "asi-fav-sites"; // { [site]: skipCount }
+  const STORAGE_KEY_RECORD = "asi-record"; // { secondes, serie, episode, horodatage } — longest single skip ever
 
-  // Keys already attempted against AniSkip during this page load. Prevents
-  // hammering the API every polling tick when a lookup fails or the show
-  // isn't found — we only try once per key per page load; a full reload
-  // (or the 7-day cache expiring) allows a fresh attempt.
-  const tentativesEffectuees = new Set();
+  // Tracks AniSkip attempts per (série, épisode) key so the polling loop
+  // (every 2s) doesn't hammer the API. Two kinds of "no result" are
+  // treated differently:
+  // - definitif: true  -> AniSkip actually answered "no skip data for
+  //   this episode" (404, or found: false). Confirmed absence, no point
+  //   retrying until a full page reload.
+  // - definitif: false -> the attempt itself failed (network error,
+  //   timeout, 5xx from AniSkip). That's very likely transient (e.g. the
+  //   outage observed live while building this: AniSkip returning 500 for
+  //   every request for a while) — retried automatically after
+  //   COOLDOWN_APRES_ECHEC_MS instead of giving up for the whole session,
+  //   so auto-detection recovers on its own once the API comes back.
+  const COOLDOWN_APRES_ECHEC_MS = 60 * 1000;
+  const tentativesEffectuees = new Map(); // cle -> { dernierEssai, definitif }
 
-  // AniSkip results are resolved fresh and kept only in memory (new) — we
-  // no longer persist them to chrome.storage.local. The site already has
-  // that data, so there's no point duplicating it on disk; only manual
-  // overrides (which AniSkip doesn't have) get saved. This also keeps the
-  // popup's "séries enregistrées" list limited to entries the user
-  // actually marked themselves.
-  const cacheAniSkipEnMemoire = new Map();
+  function tentativeEncoreValide(cle) {
+    const entree = tentativesEffectuees.get(cle);
+    if (!entree) return true;
+    if (entree.definitif) return false;
+    return Date.now() - entree.dernierEssai > COOLDOWN_APRES_ECHEC_MS;
+  }
+
+  // Auto-detected results (AniSkip or Open Anime Timestamps) are resolved
+  // fresh and kept only in memory (new) — we no longer persist them to
+  // chrome.storage.local. Those sources already have that data, so
+  // there's no point duplicating it on disk; only manual overrides
+  // (which neither source has) get saved. This also keeps the popup's
+  // "séries enregistrées" list limited to entries the user actually
+  // marked themselves.
+  const cacheTimingAutoEnMemoire = new Map();
+
+  // The Open Anime Timestamps dataset (~2MB) fetched at most once per
+  // page session, kept here so a second episode on the same page (SPA
+  // navigation) doesn't refetch it — obtenirDatasetOpenAnimeTimestamps()
+  // also persists it to chrome.storage.local across page loads.
+  let datasetOpenAnimeTimestampsEnMemoire = null;
 
   let boutonActuel = null;
-  let toggleAutoSkipElement = null;
   let serieActuelle = null;
+  let nomSerieBaseActuelle = null;
+  let saisonActuelle = null;
   let episodeActuel = null;
   let timingActuel = null;
 
-  setInterval(verifierPageEtMettreAJourUI, INTERVALLE_VERIFICATION_MS);
-  verifierPageEtMettreAJourUI();
+  // ------------------------------------------------------------
+  // contexteValide, avertirContexteInvalide, storageGet and storageSet
+  // moved to resolution.js (shared global scope, see that file's header
+  // comment) so the resolution cascade there can be unit tested with
+  // chrome.storage.local/fetch mocked. Every call site below is
+  // unchanged: those names still resolve, exactly as before.
+  // ------------------------------------------------------------
 
-  // ------------------------------------------------------------
-  // Promise wrappers around chrome.storage.local (new). The original
-  // code used the callback style directly; async/await reads better
-  // for the AniSkip resolution flow below.
-  // ------------------------------------------------------------
-  function storageGet(keys) {
-    return new Promise((resolve) => chrome.storage.local.get(keys, resolve));
+  function cleMoisActuel() {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
   }
-  function storageSet(items) {
-    return new Promise((resolve) => chrome.storage.local.set(items, resolve));
+
+  function cleJourActuel() {
+    const d = new Date();
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")}`;
+  }
+
+  /**
+   * Powers the popup's Stats page beyond the plain month/history totals:
+   * daily activity (streaks + the 7-day chart + "time saved today", none
+   * of which are derivable from the month-bucketed STORAGE_KEY_STATS),
+   * favorite series/site (skip counts aren't tracked per-series/site
+   * anywhere else), and the true all-time longest single skip (scanning
+   * STORAGE_KEY_HISTORY for a max would be wrong once a longer skip ages
+   * out past HISTORIQUE_TAILLE_MAX). One batched read + one batched write
+   * for all four keys, called alongside the STATS/HISTORY writes in
+   * enregistrerSkip (here) and enregistrerSkipAutomatique (player-frame.js
+   * — duplicated there for the same reason storageGet/fetchAvecTimeout
+   * already are: no shared module between the two content scripts).
+   */
+  async function enregistrerActiviteEtRecords(nomSerie, episode, site, secondesGagnees, horodatage) {
+    const secondes = Math.max(secondesGagnees, 0);
+    const resultat = await storageGet([
+      STORAGE_KEY_ACTIVITY,
+      STORAGE_KEY_FAVORIS_SERIES,
+      STORAGE_KEY_FAVORIS_SITES,
+      STORAGE_KEY_RECORD,
+    ]);
+
+    const activite = resultat[STORAGE_KEY_ACTIVITY] || {};
+    const jour = cleJourActuel();
+    const activiteDuJour = activite[jour] || { skips: 0, secondesGagnees: 0 };
+    activiteDuJour.skips += 1;
+    activiteDuJour.secondesGagnees += secondes;
+    activite[jour] = activiteDuJour;
+
+    const favSeries = resultat[STORAGE_KEY_FAVORIS_SERIES] || {};
+    if (nomSerie) favSeries[nomSerie] = (favSeries[nomSerie] || 0) + 1;
+
+    const favSites = resultat[STORAGE_KEY_FAVORIS_SITES] || {};
+    if (site) favSites[site] = (favSites[site] || 0) + 1;
+
+    const recordActuel = resultat[STORAGE_KEY_RECORD] || null;
+    const record =
+      !recordActuel || secondes > recordActuel.secondes
+        ? { secondes, serie: nomSerie || null, episode: episode ?? null, horodatage }
+        : recordActuel;
+
+    await storageSet({
+      [STORAGE_KEY_ACTIVITY]: activite,
+      [STORAGE_KEY_FAVORIS_SERIES]: favSeries,
+      [STORAGE_KEY_FAVORIS_SITES]: favSites,
+      [STORAGE_KEY_RECORD]: record,
+    });
+  }
+
+  /**
+   * Records one real skip (this month's counter in STORAGE_KEY_STATS +
+   * a new entry at the top of STORAGE_KEY_HISTORY, capped to the most
+   * recent HISTORIQUE_TAILLE_MAX). Called from here when the user clicks
+   * "Skip Intro" (declencheur "clic"), and from player-frame.js when
+   * auto-skip fires on its own (declencheur "auto") — both are real
+   * skips and both count, per the requested behavior.
+   */
+  async function enregistrerSkip(nomSerie, episode, secondesGagnees, declencheur, malId, site) {
+    const [statsResultat, historiqueResultat] = await Promise.all([
+      storageGet([STORAGE_KEY_STATS]),
+      storageGet([STORAGE_KEY_HISTORY]),
+    ]);
+
+    const stats = statsResultat[STORAGE_KEY_STATS] || {};
+    const mois = cleMoisActuel();
+    const statsDuMois = stats[mois] || { skips: 0, secondesGagnees: 0 };
+    statsDuMois.skips += 1;
+    statsDuMois.secondesGagnees += Math.max(secondesGagnees, 0);
+    stats[mois] = statsDuMois;
+
+    const horodatage = Date.now();
+    const historique = historiqueResultat[STORAGE_KEY_HISTORY] || [];
+    historique.unshift({
+      serie: nomSerie,
+      episode,
+      secondes: Math.max(secondesGagnees, 0),
+      declencheur,
+      horodatage,
+      malId: malId ?? null,
+      site: site ?? null,
+    });
+
+    await Promise.all([
+      storageSet({ [STORAGE_KEY_STATS]: stats }),
+      storageSet({ [STORAGE_KEY_HISTORY]: historique.slice(0, HISTORIQUE_TAILLE_MAX) }),
+      enregistrerActiviteEtRecords(nomSerie, episode, site, secondesGagnees, horodatage),
+    ]);
+
+    // Fire-and-forget: never let a Jikan lookup delay or fail the skip
+    // recording above, which just completed.
+    assurerPosterEnCache(malId);
+  }
+
+  /**
+   * Looks up and caches a poster image URL for a MAL id (new), so the
+   * popup's "Recently Skipped" list can show real cover art. Only runs
+   * once per malId — chrome.storage.local already holding a
+   * STORAGE_PREFIX_POSTER entry for it (even a failed lookup, url: null)
+   * is treated as "already looked up" and skipped, since Jikan's rate
+   * limit (60 req/min) can't take a fresh request on every single skip
+   * event for the same series. Never awaited by its caller: a slow or
+   * failing Jikan request must never block/delay recording the skip
+   * itself, only the popup thumbnail is affected.
+   */
+  async function assurerPosterEnCache(malId) {
+    if (malId == null) return;
+
+    const cle = `${STORAGE_PREFIX_POSTER}${malId}`;
+    try {
+      const cache = await storageGet([cle]);
+      if (cle in cache) return; // already looked up, success or confirmed failure
+
+      let url = null;
+      try {
+        const reponse = await fetchAvecTimeout(`${JIKAN_SEARCH_URL}/${malId}`);
+        if (reponse.ok) {
+          const donnees = await reponse.json();
+          url = donnees?.data?.images?.jpg?.image_url || donnees?.data?.images?.jpg?.large_image_url || null;
+        }
+      } catch (erreur) {
+        console.warn("[SkipSensei] Jikan poster fetch failed:", erreur.message);
+      }
+
+      await storageSet({ [cle]: { url, cachedAt: Date.now() } });
+    } catch {
+      // storageGet/storageSet already warn via avertirContexteInvalide() if
+      // the extension was reloaded mid-flight; a missing poster is purely
+      // cosmetic, nothing else to do here.
+    }
   }
 
   /**
@@ -91,26 +288,43 @@ if (window.__animeSkipIntroInjected) {
    * manuel) et met à jour le bouton + l'iframe.
    */
   async function verifierPageEtMettreAJourUI() {
-    // anime-sama.to donne l'id "playerDF" à l'iframe du lecteur.
-    const iframe = document.querySelector("iframe#playerDF") || document.querySelector("iframe");
+    const iframe = trouverIframeLecteur();
 
     if (!iframe) {
       retirerBouton();
       serieActuelle = null;
+      nomSerieBaseActuelle = null;
+      saisonActuelle = null;
       episodeActuel = null;
       timingActuel = null;
       return;
     }
 
     const adaptateur = obtenirAdaptateur();
-    const nomSerie = adaptateur.extraireNomSerie();
+    const nomSerieBase = adaptateur.extraireNomSerie();
+    const saison = adaptateur.extraireSaison ? adaptateur.extraireSaison() : 1;
     const episode = adaptateur.extraireEpisode();
-    const contexteInchange = nomSerie === serieActuelle && episode === episodeActuel && boutonActuel;
+    const obtenirUrlRacine = adaptateur.extraireUrlRacine || null;
+    // Identité qualifiée par la saison (au-delà de la 1ère) : cleTiming,
+    // le cache mémoire et l'historique doivent distinguer "Saison 2 Ép. 5"
+    // de "Saison 1 Ép. 5" — sinon un timing manuel ou en cache pour l'un
+    // s'appliquerait par erreur à l'autre (même bug que celui corrigé côté
+    // malId dans resoudreMalIdEtEpisode, juste côté cache local).
+    const nomSerie = saison > 1 ? `${nomSerieBase} (saison ${saison})` : nomSerieBase;
+    const memeContexte = nomSerie === serieActuelle && episode === episodeActuel && boutonActuel;
+    nomSerieBaseActuelle = nomSerieBase;
+    saisonActuelle = saison;
 
-    if (!contexteInchange) {
+    // Re-resolve when the episode changed, but also when we're still
+    // stuck on the manual fallback (timingActuel null) and a retry is
+    // now due — otherwise a stuck episode would never pick up AniSkip
+    // recovering mid-session, even past the cooldown.
+    const doitReessayer = !timingActuel && tentativeEncoreValide(cleTiming(nomSerie, episode));
+
+    if (!memeContexte || doitReessayer) {
       serieActuelle = nomSerie;
       episodeActuel = episode;
-      timingActuel = await resoudreEtAfficher(iframe, nomSerie, episode);
+      timingActuel = await resoudreEtAfficher(iframe, nomSerie, nomSerieBase, saison, episode, obtenirUrlRacine);
     }
 
     // Always re-push the current timing + auto-skip setting to the player
@@ -119,8 +333,7 @@ if (window.__animeSkipIntroInjected) {
     // interval.
     const parametres = await storageGet([STORAGE_KEY_SETTINGS]);
     const autoSkipEnabled = parametres[STORAGE_KEY_SETTINGS]?.autoSkipEnabled ?? true;
-    if (toggleAutoSkipElement) toggleAutoSkipElement.checked = autoSkipEnabled;
-    envoyerDonneesAutoSkip(iframe, timingActuel, autoSkipEnabled);
+    envoyerDonneesAutoSkip(iframe, nomSerie, episode, timingActuel, autoSkipEnabled);
   }
 
   // ------------------------------------------------------------
@@ -195,6 +408,53 @@ if (window.__animeSkipIntroInjected) {
   }
 
   /**
+   * voiranime.rip (new): the "Saison N" that extraireNomSerieVoiranime()
+   * strips out of the title. Needed because the site resets its episode
+   * numbering at 1 for every season, while on MAL/AniSkip's side each
+   * season past the first is its own separate entry with its own episode
+   * count — see resoudreMalIdEtEpisode for why this matters. Confirmed
+   * live: title "Jujutsu Kaisen Saison 2 Épisode 5 en streaming..." and
+   * URL ".../jujutsu-kaisen-1/saison-2/episode-5/" both carry it.
+   */
+  function extraireSaisonVoiranime() {
+    const correspondanceTitre = document.title.match(/Saison\s+(\d+)/i);
+    if (correspondanceTitre) return parseInt(correspondanceTitre[1], 10);
+
+    const correspondanceUrl = location.pathname.match(/saison-(\d+)/i);
+    if (correspondanceUrl) return parseInt(correspondanceUrl[1], 10);
+
+    return 1; // pas de "Saison" détectée : une seule saison, comportement inchangé
+  }
+
+  /**
+   * voiranime.rip (new): the anime's own root page (e.g.
+   * ".../one-piece/" from ".../one-piece/saison-7/episode-3/"), used by
+   * scraperComptesEpisodesParSaison to read the per-season episode counts
+   * directly off the site — see resoudreMalIdEtEpisode. Derived from the
+   * URL path's first segment rather than nomSerie, since the URL slug
+   * ("one-piece") is stable and unambiguous, unlike a title-derived name.
+   */
+  function extraireUrlRacineVoiranime() {
+    const segments = location.pathname.split("/").filter(Boolean);
+    return segments.length > 0 ? `${location.origin}/${segments[0]}/` : null;
+  }
+
+  /**
+   * voiranime.rip (new): VF/VOSTFR, read straight off the site's own
+   * "?lang=vostfr" query param (confirmed live, see extraireEpisodeVoiranime's
+   * doc comment for a full example URL) — a real signal the site already
+   * exposes, not a guess. Returns null (not "unknown"/placeholder) when the
+   * param is absent, so the popup's Currently Watching card can just omit
+   * the language row entirely rather than show a made-up value. No
+   * equivalent exists for anime-sama.to, so that adapter has no
+   * extraireLangue at all.
+   */
+  function extraireLangueVoiranime() {
+    const lang = new URLSearchParams(location.search).get("lang");
+    return lang ? lang.toUpperCase() : null;
+  }
+
+  /**
    * Last-resort fallback shared by every adapter: look for
    * "episode 12" / "épisode 12" / "ep 12" in the title or URL. Useful if
    * a site's more specific extraction above doesn't match (title format
@@ -208,12 +468,23 @@ if (window.__animeSkipIntroInjected) {
 
   const ADAPTATEURS_SITE = {
     "anime-sama.to": {
+      // Site's own branding, used as-is (not translated) for the popup's
+      // "Currently Watching ... on <site>" display.
+      nomSite: "Anime-Sama",
       extraireNomSerie: extraireNomSerieAnimeSama,
       extraireEpisode: extraireEpisodeAnimeSama,
+      // Pas de notion de "Saison" distincte sur ce site (voir le
+      // commentaire de extraireEpisodeAnimeSama) : toujours 1, donc
+      // resoudreMalIdEtEpisode se comporte exactement comme avant.
+      extraireSaison: () => 1,
     },
     "voiranime.rip": {
+      nomSite: "VoirAnime",
       extraireNomSerie: extraireNomSerieVoiranime,
       extraireEpisode: extraireEpisodeVoiranime,
+      extraireSaison: extraireSaisonVoiranime,
+      extraireUrlRacine: extraireUrlRacineVoiranime,
+      extraireLangue: extraireLangueVoiranime,
     },
   };
 
@@ -222,199 +493,274 @@ if (window.__animeSkipIntroInjected) {
     return ADAPTATEURS_SITE[location.hostname] || ADAPTATEURS_SITE["anime-sama.to"];
   }
 
+  /**
+   * Finds the video player iframe on the page. anime-sama.to gives it the
+   * id "playerDF"; failing that, prefer an iframe whose src matches a
+   * known player domain (see DOMAINES_LECTEUR_CONNUS) over blindly taking
+   * the first iframe on the page, which on an ad-supported site like
+   * voiranime.rip is as likely to be an ad slot as the actual player.
+   * Still falls back to the first iframe found so a new/unlisted player
+   * domain doesn't silently stop working.
+   */
+  function trouverIframeLecteur() {
+    const parId = document.querySelector("iframe#playerDF");
+    if (parId) return parId;
+
+    const iframes = Array.from(document.querySelectorAll("iframe"));
+    const connu = iframes.find((f) => DOMAINES_LECTEUR_CONNUS.some((d) => (f.src || "").includes(d)));
+    if (connu) return connu;
+
+    return iframes[0] || null;
+  }
+
   /** Builds the chrome.storage.local key for a given series + episode. */
   function cleTiming(nomSerie, episode) {
     return `${STORAGE_PREFIX_TIMING}${nomSerie}::${episode ?? "?"}`;
   }
 
-  /**
-   * Normalizes a title for comparison: strips accents, lowercases,
-   * collapses whitespace. Used to match the extracted series name
-   * against Jikan search results regardless of case/accents.
-   */
-  function normaliserTitre(texte) {
-    return (texte || "")
-      .normalize("NFD")
-      .replace(/[\u0300-\u036f]/g, "")
-      .toLowerCase()
-      .replace(/\s+/g, " ")
-      .trim();
-  }
+  // normaliserTitre, genererVariantesRecherche, fetchAvecTimeout,
+  // choisirMeilleureCorrespondance, resoudreMalIdViaJikan,
+  // resoudreMalIdViaAniList, verifierCoherenceMalId, resoudreMalId,
+  // resoudreSequelMalId, scraperComptesEpisodesParSaison,
+  // obtenirComptesEpisodesParSaison and resoudreMalIdEtEpisode all moved
+  // to resolution.js (see that file's header comment) so the anime
+  // resolution cascade can be unit tested. Every call site below is
+  // unchanged: those names still resolve via the shared global scope.
 
   /**
-   * fetch() with a hard timeout so a slow or dead API never blocks the
-   * rest of the extension — callers treat a timeout/error the same as
-   * "no data available" and fall back to manual marking.
-   */
-  async function fetchAvecTimeout(url, options = {}, delaiMs = FETCH_TIMEOUT_MS) {
-    const controleur = new AbortController();
-    const timeoutId = setTimeout(() => controleur.abort(), delaiMs);
-    try {
-      return await fetch(url, { ...options, signal: controleur.signal });
-    } finally {
-      clearTimeout(timeoutId);
-    }
-  }
-
-  /**
-   * Picks the result whose title best matches the extracted series name
-   * (case/accent-insensitive, simple equals/includes check). Both Jikan
-   * and AniList already rank their search results by relevance, so if no
-   * title looks like a match we simply take the first result as the
-   * closest guess. `obtenirTitres`/`obtenirId` let this be reused for
-   * both APIs, which don't share a response shape.
-   */
-  function choisirMeilleureCorrespondance(resultats, nomSerie, obtenirId, obtenirTitres) {
-    if (resultats.length === 0) return null;
-
-    const cible = normaliserTitre(nomSerie);
-    const titresDe = (item) => obtenirTitres(item).filter(Boolean).map(normaliserTitre);
-
-    // Two passes: an exact title match anywhere in the results must win
-    // over a mere substring match earlier in the (relevance-sorted) list
-    // — e.g. searching "one piece" shouldn't lock onto "One Piece: Stampede"
-    // just because it comes first and contains the target string.
-    const exact = resultats.find((item) => titresDe(item).some((t) => t === cible));
-    if (exact) return obtenirId(exact);
-
-    const partiel = resultats.find((item) => titresDe(item).some((t) => t.includes(cible) || cible.includes(t)));
-    if (partiel) return obtenirId(partiel);
-
-    return obtenirId(resultats[0]); // closest guess: top search result
-  }
-
-  /** MAL id lookup via Jikan's search endpoint (the API requested originally). */
-  async function resoudreMalIdViaJikan(nomSerie) {
-    try {
-      const url = `${JIKAN_SEARCH_URL}?q=${encodeURIComponent(nomSerie)}&limit=5`;
-      const reponse = await fetchAvecTimeout(url);
-      if (!reponse.ok) return null;
-
-      const donnees = await reponse.json();
-      const resultats = Array.isArray(donnees?.data) ? donnees.data : [];
-      return choisirMeilleureCorrespondance(resultats, nomSerie, (a) => a.mal_id, (a) => [
-        a.title,
-        a.title_english,
-        a.title_japanese,
-        ...(Array.isArray(a.titles) ? a.titles.map((t) => t.title) : []),
-      ]);
-    } catch (erreur) {
-      console.warn("[Anime Skip Intro] Jikan search failed:", erreur.message);
-      return null;
-    }
-  }
-
-  /**
-   * MAL id lookup via AniList's GraphQL search (fallback, new). Jikan's
-   * search endpoint proxies MyAnimeList directly and is known to time out
-   * even when the rest of Jikan is healthy — observed live while building
-   * this feature: search calls returned 504 for several minutes straight
-   * while direct-by-id lookups on that same API kept working fine.
-   * AniList exposes the MyAnimeList id as `idMal`, so it's a drop-in
-   * alternative source for the same piece of data.
-   */
-  async function resoudreMalIdViaAniList(nomSerie) {
-    const requete = `query ($s: String) { Page(perPage: 5) { media(search: $s, type: ANIME) { idMal title { romaji english native } synonyms } } }`;
-
-    try {
-      const reponse = await fetchAvecTimeout(ANILIST_GRAPHQL_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ query: requete, variables: { s: nomSerie } }),
-      });
-      if (!reponse.ok) return null;
-
-      const donnees = await reponse.json();
-      const resultats = (donnees?.data?.Page?.media || []).filter((m) => m.idMal != null);
-      if (resultats.length === 0) return null;
-
-      return choisirMeilleureCorrespondance(resultats, nomSerie, (m) => m.idMal, (m) => [
-        m.title?.romaji,
-        m.title?.english,
-        m.title?.native,
-        ...(Array.isArray(m.synonyms) ? m.synonyms : []),
-      ]);
-    } catch (erreur) {
-      console.warn("[Anime Skip Intro] AniList fallback search failed:", erreur.message);
-      return null;
-    }
-  }
-
-  /**
-   * Resolves a MyAnimeList ID for a series name: tries Jikan first (as
-   * originally requested), falls back to AniList if Jikan's search
-   * endpoint fails or times out. Cached for 7 days under a series-only
-   * key (shared across all episodes of the same show, so we don't
-   * re-query either API on every episode). Returns null (and caches that
-   * null) if neither source found a usable match.
-   */
-  async function resoudreMalId(nomSerie) {
-    const cle = `${STORAGE_PREFIX_MALID}${nomSerie}`;
-    const cache = await storageGet([cle]);
-    const entree = cache[cle];
-    if (entree && Date.now() - entree.cachedAt < ANISKIP_CACHE_TTL_MS) {
-      return entree.malId; // may legitimately be null (previous lookup failed)
-    }
-
-    let malId = await resoudreMalIdViaJikan(nomSerie);
-    if (malId == null) {
-      malId = await resoudreMalIdViaAniList(nomSerie);
-    }
-
-    await storageSet({ [cle]: { malId, cachedAt: Date.now() } });
-    return malId;
-  }
-
-  /**
-   * Full AniSkip resolution flow: series name -> MAL id (via Jikan) ->
-   * opening/ending skip times (via AniSkip) for the given episode.
+   * AniSkip lookup for a MAL id + episode — first source tried in the
+   * auto-detection cascade (see resoudreTimingAuto).
    *
-   * Returns a timing object or null. null means "AniSkip has nothing
-   * usable for this episode" (no MAL match, 404, empty results, network
-   * error, timeout...) — the caller falls back to manual marking in
-   * every one of those cases, per the requested behavior.
+   * Returns { timing, definitif }. `timing` is null when AniSkip has
+   * nothing usable (no match, 404, empty results). `definitif` tells
+   * the caller whether that "nothing" is AniSkip's confirmed answer
+   * (true — no point asking again this session) or the attempt itself
+   * failed (false — network error/timeout/5xx, likely transient,
+   * worth retrying later).
+   *
+   * @param {number} episodeLength Real duration (seconds) of the video
+   *   currently loaded in the player iframe, or 0 if unavailable (video
+   *   not loaded yet). AniSkip requires this param and — per the
+   *   official extension's own source — uses it to rescale the stored
+   *   timestamps to match this exact release's runtime; passing a
+   *   placeholder 0 (as this used to do) forces that rescale against a
+   *   nonsensical value and has been observed to 500 on entries that
+   *   need it, where the official extension (which always sends the
+   *   real duration) succeeds on the identical request.
    */
-  async function resoudreTimingAniSkip(nomSerie, episode) {
-    const malId = await resoudreMalId(nomSerie);
-    if (!malId) return null;
-
+  async function resoudreTimingAniSkip(malId, episode, episodeLength) {
     try {
-      // AniSkip requires an `episodeLength` query param (returns 400
-      // without it). We don't know the real episode length from this
-      // page (it lives in the cross-origin video iframe), so we pass 0,
-      // which AniSkip accepts as "unknown" — confirmed against the live
-      // API while building this feature.
-      const url = `${ANISKIP_BASE_URL}/${malId}/${episode}?types=op&types=ed&episodeLength=0`;
+      const url = `${ANISKIP_BASE_URL}/${malId}/${episode}?types=op&types=ed&episodeLength=${episodeLength.toFixed(3)}`;
       const reponse = await fetchAvecTimeout(url);
 
-      if (reponse.status === 404) return null; // no skip times for this episode
-      if (!reponse.ok) return null;
+      if (reponse.status === 404) {
+        return { timing: null, definitif: true }; // AniSkip confirmed: no data for this episode
+      }
+      if (!reponse.ok) {
+        // Distinct from "no data for this episode" (404): the API itself
+        // is erroring (e.g. observed live: a 500 outage affecting every
+        // request regardless of anime/episode). Logged so this is
+        // diagnosable from the page's console instead of silently falling
+        // back to manual marking with no trace of why. Retryable: this
+        // kind of failure is very likely transient.
+        console.warn(`[SkipSensei] AniSkip returned ${reponse.status} for MAL id ${malId} ép. ${episode}.`);
+        return { timing: null, definitif: false };
+      }
 
       const donnees = await reponse.json();
       if (!donnees.found || !Array.isArray(donnees.results) || donnees.results.length === 0) {
-        return null;
+        return { timing: null, definitif: true }; // AniSkip answered, just has nothing for this episode
       }
 
       const opening = donnees.results.find((r) => r.skipType === "op");
-      if (!opening) return null; // we only auto-skip the opening ("skip intro")
+      if (!opening) {
+        return { timing: null, definitif: true }; // we only auto-skip the opening ("skip intro")
+      }
 
       const ending = donnees.results.find((r) => r.skipType === "ed");
 
+      // NOTE: results also carry their own r.episodeLength (the runtime of
+      // whatever release the timestamp was originally submitted from), and
+      // in principle a mismatch against the real `episodeLength` sent above
+      // means startTime/endTime should be shifted by the difference. A
+      // client-side correction along those lines was tried here and pulled
+      // back out: reverse-engineered from AniSkip's *minified* production
+      // bundle, it caused auto-skip to fire on wrong/near-zero timestamps
+      // with no user action — worse than not correcting at all. Using the
+      // raw values below, as before, until this can be verified against
+      // real (non-minified) source or documented behavior.
       return {
-        debut: opening.interval.startTime,
-        fin: opening.interval.endTime,
-        // Ending timestamps are stored for completeness / possible future
-        // use, but auto-skip currently only acts on the opening interval,
-        // matching the extension's existing "skip intro" scope.
-        debutEd: ending ? ending.interval.startTime : null,
-        finEd: ending ? ending.interval.endTime : null,
-        source: "aniskip",
-        cachedAt: Date.now(),
+        timing: {
+          debut: opening.interval.startTime,
+          fin: opening.interval.endTime,
+          // Ending timestamps are stored for completeness / possible future
+          // use, but auto-skip currently only acts on the opening interval,
+          // matching the extension's existing "skip intro" scope.
+          debutEd: ending ? ending.interval.startTime : null,
+          finEd: ending ? ending.interval.endTime : null,
+          source: "aniskip",
+          cachedAt: Date.now(),
+        },
+        definitif: true,
       };
     } catch (erreur) {
-      console.warn("[Anime Skip Intro] AniSkip request failed:", erreur.message);
-      return null;
+      console.warn("[SkipSensei] AniSkip request failed:", erreur.message);
+      return { timing: null, definitif: false }; // network error/timeout — retryable
     }
+  }
+
+  /**
+   * Converts a MAL id to an AniDB id via relations.yuna.moe, cached for
+   * 7 days per series (same TTL/shape pattern as resoudreMalId).
+   */
+  async function resoudreAniDbId(malId) {
+    const cle = `${STORAGE_PREFIX_ANIDBID}${malId}`;
+    const cache = await storageGet([cle]);
+    const entree = cache[cle];
+    if (entree && Date.now() - entree.cachedAt < ANISKIP_CACHE_TTL_MS) {
+      return entree.aniDbId; // may legitimately be null (previous lookup failed)
+    }
+
+    let aniDbId = null;
+    try {
+      const url = `${RELATIONS_YUNA_URL}?source=myanimelist&id=${malId}`;
+      const reponse = await fetchAvecTimeout(url);
+      if (reponse.ok) {
+        const donnees = await reponse.json();
+        aniDbId = typeof donnees?.anidb === "number" ? donnees.anidb : null;
+      }
+    } catch (erreur) {
+      console.warn("[SkipSensei] relations.yuna.moe request failed:", erreur.message);
+    }
+
+    await storageSet({ [cle]: { aniDbId, cachedAt: Date.now() } });
+    return aniDbId;
+  }
+
+  /**
+   * Fetches the Open Anime Timestamps dataset (once per page session,
+   * cached across sessions in chrome.storage.local for ANISKIP_CACHE_TTL_MS
+   * — it's a static file that's rarely updated, no need to redownload
+   * ~2MB on every episode).
+   */
+  async function obtenirDatasetOpenAnimeTimestamps() {
+    if (datasetOpenAnimeTimestampsEnMemoire) return datasetOpenAnimeTimestampsEnMemoire;
+
+    const cache = await storageGet([STORAGE_KEY_OAT_CACHE]);
+    const entree = cache[STORAGE_KEY_OAT_CACHE];
+    if (entree && Date.now() - entree.cachedAt < ANISKIP_CACHE_TTL_MS) {
+      datasetOpenAnimeTimestampsEnMemoire = entree.data;
+      return datasetOpenAnimeTimestampsEnMemoire;
+    }
+
+    const reponse = await fetchAvecTimeout(OPEN_ANIME_TIMESTAMPS_URL);
+    if (!reponse.ok) throw new Error(`HTTP ${reponse.status}`);
+    const donnees = await reponse.json();
+
+    datasetOpenAnimeTimestampsEnMemoire = donnees;
+    await storageSet({ [STORAGE_KEY_OAT_CACHE]: { data: donnees, cachedAt: Date.now() } });
+    return donnees;
+  }
+
+  /**
+   * Open Anime Timestamps lookup — second source tried, only reached
+   * when AniSkip has nothing. Same { timing, definitif } contract as
+   * resoudreTimingAniSkip. Unlike AniSkip, this dataset only records
+   * where the opening *starts* (no end time), so `fin` here is an
+   * estimate (start + OAT_DUREE_OP_DEFAUT_S) — noticeably less precise
+   * than AniSkip's measured interval.
+   */
+  async function resoudreTimingOpenAnimeTimestamps(malId, episode) {
+    const aniDbId = await resoudreAniDbId(malId);
+    if (aniDbId == null) {
+      // relations.yuna.moe not resolving isn't necessarily "no mapping
+      // exists" — treat as retryable rather than a confirmed dead end.
+      return { timing: null, definitif: false };
+    }
+
+    let dataset;
+    try {
+      dataset = await obtenirDatasetOpenAnimeTimestamps();
+    } catch (erreur) {
+      console.warn("[SkipSensei] Open Anime Timestamps fetch failed:", erreur.message);
+      return { timing: null, definitif: false };
+    }
+
+    const entrees = dataset[String(aniDbId)];
+    if (!Array.isArray(entrees)) {
+      return { timing: null, definitif: true }; // dataset loaded fine, this AniDB id just isn't in it
+    }
+
+    const entree = entrees.find((e) => e.episode_number === episode);
+    if (!entree || typeof entree.opening_start !== "number" || entree.opening_start < 0) {
+      return { timing: null, definitif: true }; // dataset loaded fine, nothing usable for this episode
+    }
+
+    return {
+      timing: {
+        debut: entree.opening_start,
+        fin: entree.opening_start + OAT_DUREE_OP_DEFAUT_S,
+        source: "open-anime-timestamps",
+        cachedAt: Date.now(),
+      },
+      definitif: true,
+    };
+  }
+
+  /**
+   * Runs the auto-detection cascade for (nomSerie, episode): AniSkip
+   * first, Open Anime Timestamps second, stopping at the first source
+   * that returns a timing. Logs which source answered (or didn't) at
+   * each step. Returns { timing, definitif } — definitif is true only
+   * when EVERY attempted source gave a confirmed "no data" answer; a
+   * single transient failure keeps the whole attempt retryable.
+   */
+  async function resoudreTimingAuto(nomSerieBase, saison, episodeSite, episodeLength, obtenirUrlRacine) {
+    // "serie-inconnue" is extraireNomSerieAnimeSama()'s fallback when
+    // document.title is empty (page still loading, most likely) — no point
+    // spending a Jikan/AniList search on a name we know can't match.
+    // definitif: false so it's retried once the title actually loads,
+    // instead of being marked as a confirmed dead end for the session.
+    if (!nomSerieBase || nomSerieBase === "serie-inconnue") {
+      return { timing: null, definitif: false };
+    }
+
+    const { malId, episode } = await resoudreMalIdEtEpisode(nomSerieBase, saison, episodeSite, obtenirUrlRacine);
+    if (!malId || episode == null) {
+      console.log(
+        `[SkipSensei] Source: aucune — pas d'ID MyAnimeList/épisode résolu pour "${nomSerieBase}" (saison ${saison}, ép. site ${episodeSite}).`
+      );
+      return { timing: null, definitif: false };
+    }
+    const suffixeEpisode = episode === episodeSite ? `ép. ${episode}` : `ép. site ${episodeSite} -> ép. absolu ${episode}`;
+
+    const resultatAniSkip = await resoudreTimingAniSkip(malId, episode, episodeLength);
+    if (resultatAniSkip.timing) {
+      resultatAniSkip.timing.malId = malId; // carried through to enregistrerSkip/envoyerDonneesAutoSkip
+      console.log(`[SkipSensei] Source: AniSkip — timing trouvé pour "${nomSerieBase}" saison ${saison} ${suffixeEpisode}.`);
+      return resultatAniSkip;
+    }
+    console.log(
+      `[SkipSensei] Source: AniSkip — rien pour "${nomSerieBase}" saison ${saison} ${suffixeEpisode} ` +
+        `(${resultatAniSkip.definitif ? "aucune donnée" : "échec temporaire"}), essai suivant...`
+    );
+
+    const resultatOAT = await resoudreTimingOpenAnimeTimestamps(malId, episode);
+    if (resultatOAT.timing) {
+      resultatOAT.timing.malId = malId; // carried through to enregistrerSkip/envoyerDonneesAutoSkip
+      console.log(`[SkipSensei] Source: Open Anime Timestamps — timing trouvé pour "${nomSerieBase}" saison ${saison} ${suffixeEpisode}.`);
+      return resultatOAT;
+    }
+    console.log(
+      `[SkipSensei] Source: Open Anime Timestamps — rien pour "${nomSerieBase}" saison ${saison} ${suffixeEpisode} ` +
+        `(${resultatOAT.definitif ? "aucune donnée" : "échec temporaire"}).`
+    );
+    console.log(`[SkipSensei] Aucune source automatique — repli sur le marquage manuel pour "${nomSerieBase}" saison ${saison} ${suffixeEpisode}.`);
+
+    return {
+      timing: null,
+      definitif: resultatAniSkip.definitif && resultatOAT.definitif,
+    };
   }
 
   /**
@@ -429,7 +775,7 @@ if (window.__animeSkipIntroInjected) {
    * and finally falls back to the manual-marking UI when none of the
    * above produced usable data.
    */
-  async function resoudreEtAfficher(iframe, nomSerie, episode) {
+  async function resoudreEtAfficher(iframe, nomSerie, nomSerieBase, saison, episode, obtenirUrlRacine) {
     const cle = cleTiming(nomSerie, episode);
 
     const cache = await storageGet([cle]);
@@ -439,12 +785,14 @@ if (window.__animeSkipIntroInjected) {
       return manuel;
     }
 
-    let timing = cacheAniSkipEnMemoire.get(cle) || null;
+    let timing = cacheTimingAutoEnMemoire.get(cle) || null;
 
-    if (!timing && episode != null && !tentativesEffectuees.has(cle)) {
-      tentativesEffectuees.add(cle);
-      timing = await resoudreTimingAniSkip(nomSerie, episode);
-      if (timing) cacheAniSkipEnMemoire.set(cle, timing);
+    if (!timing && episode != null && tentativeEncoreValide(cle)) {
+      const episodeLength = await obtenirDureeVideo(iframe);
+      const resultat = await resoudreTimingAuto(nomSerieBase, saison, episode, episodeLength, obtenirUrlRacine);
+      timing = resultat.timing;
+      tentativesEffectuees.set(cle, { dernierEssai: Date.now(), definitif: resultat.definitif });
+      if (timing) cacheTimingAutoEnMemoire.set(cle, timing);
     }
 
     afficherPanneau(iframe, nomSerie, episode, timing);
@@ -455,15 +803,15 @@ if (window.__animeSkipIntroInjected) {
     const conteneur = document.getElementById("asi-floating-container");
     if (conteneur) conteneur.remove();
     boutonActuel = null;
-    toggleAutoSkipElement = null;
   }
 
   /**
-   * Builds the on-page floating panel (redesigned, new): a small card with
-   * the detected series/episode + source badge, an auto-skip on/off
-   * switch (so this setting no longer requires opening the popup), and
-   * the action button — "Skip Intro" when timing data is available, or
-   * "Marquer fin d'intro" as the manual fallback otherwise.
+   * Builds the on-page floating panel: just the action button — "Skip
+   * Intro" when timing data is available, or "Marquer fin d'intro" as
+   * the manual fallback otherwise. No series/episode title and no
+   * auto-skip switch here anymore: the auto-skip toggle already lives
+   * in the popup (chrome.storage.local["asi-settings"]), duplicating
+   * it on-page just added a second control for the same setting.
    */
   function afficherPanneau(iframe, nomSerie, episode, timing) {
     retirerBouton();
@@ -471,59 +819,6 @@ if (window.__animeSkipIntroInjected) {
     const conteneur = document.createElement("div");
     conteneur.id = "asi-floating-container";
 
-    // --- Header: series/episode + source badge ---
-    const entete = document.createElement("div");
-    entete.id = "asi-panel-header";
-
-    const titre = document.createElement("span");
-    titre.id = "asi-panel-title";
-    const episodeTxt = episode != null ? `Ép. ${episode}` : "épisode inconnu";
-    titre.textContent = `${nomSerie} — ${episodeTxt}`;
-    entete.appendChild(titre);
-
-    if (timing?.source) {
-      const badge = document.createElement("span");
-      badge.id = "asi-panel-badge";
-      badge.classList.add(timing.source === "aniskip" ? "asi-badge-auto" : "asi-badge-manual");
-      badge.textContent = timing.source === "aniskip" ? "🤖 Auto" : "✋ Manuel";
-      entete.appendChild(badge);
-    }
-
-    conteneur.appendChild(entete);
-
-    // --- Auto-skip on/off switch (new) ---
-    const ligneToggle = document.createElement("label");
-    ligneToggle.id = "asi-toggle-row";
-
-    const interrupteur = document.createElement("input");
-    interrupteur.type = "checkbox";
-    interrupteur.id = "asi-toggle-autoskip";
-
-    const curseur = document.createElement("span");
-    curseur.id = "asi-toggle-slider";
-
-    const texteToggle = document.createElement("span");
-    texteToggle.id = "asi-toggle-label";
-    texteToggle.textContent = "Saut automatique";
-
-    ligneToggle.appendChild(interrupteur);
-    ligneToggle.appendChild(curseur);
-    ligneToggle.appendChild(texteToggle);
-    conteneur.appendChild(ligneToggle);
-
-    toggleAutoSkipElement = interrupteur;
-    storageGet([STORAGE_KEY_SETTINGS]).then((resultat) => {
-      interrupteur.checked = resultat[STORAGE_KEY_SETTINGS]?.autoSkipEnabled ?? true;
-    });
-    interrupteur.addEventListener("change", () => {
-      // Shares the same storage key as the popup's checkbox, so both stay
-      // in sync (the popup reflects this change next time it's opened,
-      // and this switch picks up popup changes on the next polling tick).
-      storageSet({ [STORAGE_KEY_SETTINGS]: { autoSkipEnabled: interrupteur.checked } });
-    });
-
-    // --- Action button: Skip Intro (AniSkip/manual data available) or
-    //     Marquer fin d'intro (manual-marking fallback) ---
     const bouton = document.createElement("button");
     bouton.id = "asi-floating-button";
     conteneur.appendChild(bouton);
@@ -535,15 +830,23 @@ if (window.__animeSkipIntroInjected) {
       bouton.textContent = "⏭ Skip Intro";
       bouton.addEventListener("click", () => {
         iframe.contentWindow.postMessage({ canal: CANAL, type: "seek", time: timing.fin }, "*");
+        const secondesGagnees = typeof timing.debut === "number" ? timing.fin - timing.debut : 0;
+        enregistrerSkip(nomSerie, episode, secondesGagnees, "clic", timing.malId, obtenirAdaptateur().nomSite || null);
       });
     } else {
       bouton.textContent = "🏁 Marquer fin d'intro";
       bouton.addEventListener("click", async () => {
+        if (!contexteValide()) {
+          avertirContexteInvalide();
+          alert("L'extension a été mise à jour. Rafraîchis cette page (F5) pour continuer à l'utiliser.");
+          return;
+        }
+
         let reponse;
         try {
           reponse = await envoyerMessageAuLecteur(iframe, { type: "get-current-time" }, "current-time");
         } catch (erreur) {
-          console.warn("[Anime Skip Intro]", erreur.message);
+          console.warn("[SkipSensei]", erreur.message);
           alert(
             "Impossible de récupérer le temps de la vidéo. " +
             "Essaie de changer de lecteur (Lecteur 1/2/3) ou attends que la vidéo soit bien chargée."
@@ -552,22 +855,31 @@ if (window.__animeSkipIntroInjected) {
         }
 
         const cle = cleTiming(nomSerie, episode);
-        const cache = await storageGet([cle]);
-        const ancienTiming = cache[cle] || { debut: 0 };
 
-        const nouveauTiming = {
-          debut: ancienTiming.debut ?? 0,
-          fin: reponse.time,
-          source: "manual",
-        };
+        try {
+          const cache = await storageGet([cle]);
+          const ancienTiming = cache[cle] || { debut: 0 };
 
-        await storageSet({ [cle]: nouveauTiming });
-        console.log(
-          `[Anime Skip Intro] Timing enregistré pour "${nomSerie}" (ép. ${episode}) :`,
-          nouveauTiming
-        );
-        timingActuel = nouveauTiming;
-        afficherPanneau(iframe, nomSerie, episode, nouveauTiming);
+          const nouveauTiming = {
+            debut: ancienTiming.debut ?? 0,
+            fin: reponse.time,
+            source: "manual",
+          };
+
+          await storageSet({ [cle]: nouveauTiming });
+          console.log(
+            `[SkipSensei] Timing enregistré pour "${nomSerie}" (ép. ${episode}) :`,
+            nouveauTiming
+          );
+          timingActuel = nouveauTiming;
+          afficherPanneau(iframe, nomSerie, episode, nouveauTiming);
+        } catch (erreur) {
+          // contexteValide() was true a few lines up but the extension
+          // could have been reloaded in the meantime (click → await →
+          // reload race); storageGet/storageSet already logged the clear
+          // message via avertirContexteInvalide() in that case.
+          if (contexteValide()) console.error("[SkipSensei] Échec de l'enregistrement du timing :", erreur);
+        }
       });
     }
 
@@ -614,23 +926,173 @@ if (window.__animeSkipIntroInjected) {
   }
 
   /**
+   * Real duration (seconds) of the video currently loaded in the player
+   * iframe, for the AniSkip request's `episodeLength` param — see
+   * resoudreTimingAniSkip for why this matters. Falls back to 0 ("unknown"
+   * to AniSkip) if the iframe doesn't answer in time or the video's
+   * metadata hasn't loaded yet (video.duration is NaN at that point):
+   * failing to get a real duration should degrade the request, not block
+   * auto-detection entirely.
+   */
+  async function obtenirDureeVideo(iframe) {
+    try {
+      const reponse = await envoyerMessageAuLecteur(iframe, { type: "get-duration" }, "duration");
+      return Number.isFinite(reponse.duration) && reponse.duration > 0 ? reponse.duration : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
    * Sends the current skip window + the user's auto-skip preference to
    * the player iframe (new). player-frame.js keeps watching video
    * playback and seeks past the intro on its own when enabled. Sent on
    * every polling tick (including when unchanged) so a setting toggled
    * from the popup is picked up within one interval.
    */
-  function envoyerDonneesAutoSkip(iframe, timing, autoSkipEnabled) {
+  function envoyerDonneesAutoSkip(iframe, nomSerie, episode, timing, autoSkipEnabled) {
     iframe.contentWindow.postMessage(
       {
         canal: CANAL,
         type: "set-skip-data",
+        serie: nomSerie,
+        episode,
         debut: timing?.debut ?? null,
         fin: timing?.fin ?? null,
+        malId: timing?.malId ?? null,
         autoSkipEnabled: !!autoSkipEnabled,
+        // New: so player-frame.js can tag its own auto-skip history/stats
+        // entries with the site, the same way enregistrerSkip already does
+        // for manual clicks — see enregistrerActiviteEtRecords.
+        site: obtenirAdaptateur().nomSite || null,
       },
       "*"
     );
   }
 
+  // ------------------------------------------------------------
+  // Popup <-> content script bridge (new). This is a completely
+  // different channel from the postMessage one above (which talks to
+  // the cross-origin player iframe): chrome.runtime.onMessage is how
+  // popup.js, running in the extension popup, asks this script for
+  // its current state (serieActuelle/episodeActuel/timingActuel are
+  // otherwise only kept in memory here, never in chrome.storage).
+  // ------------------------------------------------------------
+  chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+    if (message?.type !== "asi-get-state") return; // not for us
+
+    const adaptateur = obtenirAdaptateur();
+    const reponseBase = {
+      serie: serieActuelle,
+      serieBase: nomSerieBaseActuelle,
+      saison: saisonActuelle,
+      episode: episodeActuel,
+      timing: timingActuel,
+      site: adaptateur.nomSite || null,
+      // New: real signal when the site exposes one (voiranime.rip's own
+      // VF/VOSTFR query param) — null, never a guess, when it doesn't.
+      langue: adaptateur.extraireLangue ? adaptateur.extraireLangue() : null,
+    };
+
+    const timingResolu =
+      timingActuel && typeof timingActuel.debut === "number" && typeof timingActuel.fin === "number";
+    const iframe = timingResolu ? trouverIframeLecteur() : null;
+
+    if (!iframe) {
+      // Nothing to skip yet (or no timing resolved): answer synchronously,
+      // same as before this change — no added latency for the common case.
+      sendResponse({ ...reponseBase, enCoursDeSkip: false });
+      return;
+    }
+
+    // New: best-effort live "Skipping…" state for the popup's Dashboard,
+    // asking the player iframe for its actual current playback position —
+    // same request player-frame.js already answers for obtenirDureeVideo's
+    // sibling ("get-duration"), just never called from here until now.
+    // A slow/absent answer just means we can't tell (falls back to "not
+    // skipping" rather than blocking the popup on iframe latency).
+    envoyerMessageAuLecteur(iframe, { type: "get-current-time" }, "current-time")
+      .then((reponseIframe) => {
+        const t = reponseIframe.time;
+        const enCoursDeSkip = Number.isFinite(t) && t >= timingActuel.debut && t < timingActuel.fin;
+        sendResponse({ ...reponseBase, enCoursDeSkip });
+      })
+      .catch(() => {
+        sendResponse({ ...reponseBase, enCoursDeSkip: false });
+      });
+
+    return true; // keep the message channel open for the async sendResponse above
+  });
+
+  /**
+   * verifierPageEtMettreAJourUI is async; calling it without awaiting
+   * (required here — setInterval can't await) leaves a rejected promise
+   * unhandled if it throws, which is exactly what error 3 looked like
+   * in the console. contexteValide() already logs a clear message for
+   * the "extension reloaded" case via storageGet/storageSet; anything
+   * else still gets logged instead of silently vanishing.
+   */
+  function lancerVerification() {
+    verifierPageEtMettreAJourUI().catch((erreur) => {
+      if (!contexteValide()) return; // already warned
+      console.error("[SkipSensei] Erreur inattendue dans verifierPageEtMettreAJourUI :", erreur);
+    });
+  }
+
+  // Kicked off last, on purpose: this is the only thing in the module
+  // that actually runs code synchronously (everything above this line
+  // is just declarations). Starting it before every const/function it
+  // transitively depends on (ADAPTATEURS_SITE in particular) has been
+  // declared caused a "Cannot access before initialization" crash on
+  // page loads where the player iframe was already present at
+  // document_idle — see obtenirAdaptateur().
+  setInterval(lancerVerification, INTERVALLE_VERIFICATION_MS);
+  lancerVerification();
+
+  // ------------------------------------------------------------
+  // Faster detection (new). The poll above is now just a safety net —
+  // most changes are caught immediately by:
+  // - a capturing "change" listener: anime-sama.to's episode <select>
+  //   (see extraireEpisodeAnimeSama) fires a native "change" event the
+  //   instant the user picks a new episode, but never touches the DOM
+  //   tree, so a MutationObserver alone would never see it.
+  // - a debounced MutationObserver: catches the player <iframe> being
+  //   inserted/swapped, whether that's an SPA navigation on
+  //   anime-sama.to or the initial page load on voiranime.rip. Debounced
+  //   because streaming sites tend to have ad scripts churning the DOM
+  //   continuously; running the full check on every single mutation
+  //   would be wasteful.
+  // ------------------------------------------------------------
+  let minuteurDebounceMutation = null;
+  function surMutationDom() {
+    clearTimeout(minuteurDebounceMutation);
+    minuteurDebounceMutation = setTimeout(lancerVerification, 200);
+  }
+
+  document.addEventListener("change", lancerVerification, true);
+
+  new MutationObserver(surMutationDom).observe(document.documentElement, {
+    childList: true,
+    subtree: true,
+  });
+
+  // ------------------------------------------------------------
+  // React immediately when the saved timing for the episode currently
+  // on screen is deleted or edited from the popup's "Timings enregistrés"
+  // list (new — see popup.js initSavedTimingsList). Without this, a
+  // manual entry removed from the popup would keep being used here until
+  // a full page reload: timingActuel/cacheTimingAutoEnMemoire/
+  // tentativesEffectuees are all in-memory and nothing previously told
+  // this script that chrome.storage had changed out from under it.
+  // ------------------------------------------------------------
+  chrome.storage.onChanged.addListener((changements, zone) => {
+    if (zone !== "local") return;
+    const cle = cleTiming(serieActuelle, episodeActuel);
+    if (!(cle in changements)) return;
+
+    cacheTimingAutoEnMemoire.delete(cle);
+    tentativesEffectuees.delete(cle);
+    timingActuel = null;
+    lancerVerification();
+  });
 }

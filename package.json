@@ -1,0 +1,14 @@
+{
+  "name": "skipsensei",
+  "private": true,
+  "version": "1.0.0",
+  "description": "Test suite for SkipSensei's anime-resolution cascade.",
+  "type": "commonjs",
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "vitest": "^2.1.9"
+  }
+}

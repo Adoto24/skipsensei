@@ -1,14 +1,23 @@
 {
   "manifest_version": 3,
-  "name": "Anime Skip Intro",
-  "version": "1.0.0",
+  "name": "SkipSensei",
+  "version": "1.0",
   "description": "Ajoute un bouton flottant pour sauter l'intro des animes sur un site de streaming.",
 
-  "permissions": ["storage"],
+  "icons": {
+    "16": "icons/icon16.png",
+    "32": "icons/icon32.png",
+    "48": "icons/icon48.png",
+    "128": "icons/icon128.png"
+  },
+
+  "permissions": ["storage", "tabs"],
   "host_permissions": [
     "https://api.jikan.moe/*",
     "https://api.aniskip.com/*",
-    "https://graphql.anilist.co/*"
+    "https://graphql.anilist.co/*",
+    "https://relations.yuna.moe/*",
+    "https://raw.githubusercontent.com/*"
   ],
 
   "content_scripts": [
@@ -19,7 +28,7 @@
         "*://voiranime.rip/*",
         "*://*.voiranime.rip/*"
       ],
-      "js": ["content.js"],
+      "js": ["resolution.js", "content.js"],
       "css": ["content.css"],
       "run_at": "document_idle"
     },
@@ -38,6 +47,12 @@
 
   "action": {
     "default_popup": "popup.html",
-    "default_title": "Anime Skip Intro"
+    "default_title": "SkipSensei",
+    "default_icon": {
+      "16": "icons/icon16.png",
+      "32": "icons/icon32.png",
+      "48": "icons/icon48.png",
+      "128": "icons/icon128.png"
+    }
   }
 }
