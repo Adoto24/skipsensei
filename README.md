@@ -23,20 +23,24 @@ anime-sama.to (page principale)          iframe (vidmoly / sibnet / sendvid)
 ┌─────────────────────────────┐          ┌───────────────────────────────┐
 │ content.js                  │          │ player-frame.js               │
 │ - lit document.title        │  postMessage  │ - trouve <video>         │
-│ - affiche le bouton flottant│ ────────────► │ - fait video.currentTime │
-│ - stocke/lit chrome.storage │ ◄──────────── │   = X, ou renvoie le     │
-│                              │  postMessage  │   temps actuel          │
+│ - résout le timing AniSkip  │ ────────────► │ - affiche + positionne   │
+│ - stocke/lit chrome.storage │ ◄──────────── │   le bouton flottant sur │
+│                              │  postMessage  │   la vidéo, gère clics   │
 └─────────────────────────────┘          └───────────────────────────────┘
 ```
+
+Le bouton flottant lui-même vit dans `player-frame.js`, pas `content.js` :
+un élément ajouté sur la page principale ne peut de toute façon pas
+apparaître "par-dessus" la vidéo une fois que l'iframe (cross-origin) passe
+en plein écran — seul le sous-arbre de l'élément plein écran est rendu.
 
 ## Structure du projet
 
 ```
 anime-skip-intro/
 ├── manifest.json     → déclare les DEUX content scripts (voir ci-dessous)
-├── content.js        → tourne sur le site anime : bouton flottant + nom de série
-├── content.css       → style du bouton flottant
-├── player-frame.js   → tourne DANS l'iframe du lecteur : trouve/contrôle <video>
+├── content.js        → tourne sur le site anime : résolution du timing + nom de série
+├── player-frame.js   → tourne DANS l'iframe du lecteur : trouve/contrôle <video> + bouton flottant
 ├── popup.html        → interface du popup (dashboard, stats, historique)
 ├── popup.js          → logique du popup (lecture/édition/suppression)
 ├── popup.css         → style du popup
@@ -84,16 +88,29 @@ le popup.
 
 ## Fonctionnement du bouton flottant
 
+Le bouton est construit et positionné par `player-frame.js`, ancré en bas
+à droite de la balise `<video>` elle-même (style Netflix), pas de la page
+entière. `content.js` continue de résoudre le timing et lui envoie via
+`postMessage` (`set-skip-data`) ; le bouton lui répond de la même façon
+(`skip-performed` / `mark-intro-end`) pour que `content.js` enregistre les
+stats/l'historique.
+
 - Aucun timing enregistré pour la série détectée → bouton
-  **"🏁 Marquer fin d'intro"**. Un clic demande à l'iframe le temps actuel
-  de la vidéo (via `postMessage`) et l'enregistre comme fin d'intro
-  (`fin`) pour cette série, avec `debut: 0` par défaut.
-- Un timing existe déjà → bouton **"⏭ Skip Intro"**. Un clic demande à
-  l'iframe de faire `video.currentTime = timing.fin`.
+  **"🏁 Marquer fin d'intro"**, toujours visible. Un clic lit
+  `video.currentTime` directement (même document) et l'envoie à
+  `content.js`, qui l'enregistre comme fin d'intro (`fin`) pour cette
+  série, avec `debut: 0` par défaut.
+- Un timing existe déjà → bouton **"⏭ Skip Intro"**, visible seulement de
+  0,5s avant le début de l'intro jusqu'à sa fin (plus quelques secondes
+  après un skip, le temps que la lecture reprenne réellement). Un clic
+  fait `video.currentTime = timing.fin` directement.
 - Le champ `debut` n'est pas modifiable depuis la page elle-même : il
   peut être ajusté manuellement depuis le popup si besoin.
-- Si l'iframe ne répond pas sous 1,5 seconde (lecteur pas encore chargé,
-  ou domaine non géré), une alerte invite à changer de lecteur.
+- En plein écran, le bouton n'apparaît que si le lecteur met en plein
+  écran un conteneur autour de la vidéo (cas de video.js, confirmé sur
+  sibnet) et non la balise `<video>` elle-même directement — dans ce
+  second cas, aucun élément ne peut être injecté dedans, limitation du
+  navigateur et non un bug de l'extension.
 
 ## Si anime-sama.to ajoute/change un lecteur vidéo
 
@@ -111,5 +128,6 @@ d'ajouter ce domaine au tableau `matches` du deuxième bloc
   `player-frame.js` ne la traversera pas automatiquement (à vérifier au
   cas par cas si "Marquer fin d'intro" ne répond pas sur un lecteur donné).
 - Auto-skip existe déjà (toggle dans le popup, exécuté par
-  `player-frame.js`) et un bouton manuel "Skip Intro" reste disponible ;
-  pas de raccourcis clavier pour l'instant.
+  `player-frame.js`) et un bouton manuel "Skip Intro" reste disponible.
+  Raccourcis clavier sur la page (S / M / A) — voir `RACCOURCIS_CLAVIER`
+  dans `content.js`.

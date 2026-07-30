@@ -30,9 +30,6 @@
         <span class="version-pill" id="version-pill">—</span>
       </div>
       <div class="header-actions">
-        <button class="icon-btn" id="btn-settings" title="Settings" aria-label="Settings">
-          <i class="ph ph-gear"></i>
-        </button>
         <button class="icon-btn" id="btn-theme" title="Toggle dark mode" aria-label="Toggle dark mode">
           <i class="ph ph-moon"></i>
         </button>
@@ -42,113 +39,71 @@
       </div>
     </header>
 
-    <!-- Settings: full-panel swap, same mechanism as Manual Timings below -->
-    <div class="card view-detail" id="settings-panel" hidden>
+    <!-- Scrollable body: everything between the header and the bottom nav
+         lives in here (both view-detail overlays + all three view-panels),
+         so switching tabs / opening a detail panel never resizes the popup
+         window itself — only this region scrolls when a tab's content is
+         taller than the fixed frame. See popup.css .popup-content. -->
+    <div class="popup-content" id="popup-content">
+
+    <!-- Keyboard Shortcuts: full-panel swap, same pattern as Manual Timings -->
+    <div class="card view-detail" id="shortcuts-panel" hidden>
       <div class="view-detail-header">
         <div class="view-detail-heading">
-          <p class="view-detail-title">Settings</p>
-          <p class="view-detail-subtitle">Everything SkipSensei actually lets you configure</p>
+          <p class="view-detail-title">Keyboard Shortcuts</p>
+          <p class="view-detail-subtitle">Active on the page whenever a supported player is on screen</p>
         </div>
-        <button class="icon-btn" id="btn-close-settings" aria-label="Close settings">
+        <button class="icon-btn" id="btn-close-shortcuts" aria-label="Close Keyboard Shortcuts">
           <i class="ph ph-x"></i>
         </button>
       </div>
+      <ul class="shortcut-list">
+        <li class="shortcut-item">
+          <span class="shortcut-key">S</span>
+          <div class="shortcut-text">
+            <p class="shortcut-title">Skip Intro</p>
+            <p class="shortcut-desc">Same as clicking "Skip Intro" — only works once a timing is resolved.</p>
+          </div>
+        </li>
+        <li class="shortcut-item">
+          <span class="shortcut-key">M</span>
+          <div class="shortcut-text">
+            <p class="shortcut-title">Mark Intro End</p>
+            <p class="shortcut-desc">Same as clicking "Marquer fin d'intro" — only while no timing has been detected yet.</p>
+          </div>
+        </li>
+        <li class="shortcut-item">
+          <span class="shortcut-key">A</span>
+          <div class="shortcut-text">
+            <p class="shortcut-title">Toggle Auto Skip Intro</p>
+            <p class="shortcut-desc">Flips the same Auto Skip Intro switch as the Dashboard and Settings toggles.</p>
+          </div>
+        </li>
+      </ul>
+      <p class="shortcuts-note">Ignored while typing in a text field on the page.</p>
+    </div>
 
-      <div class="settings-scroll">
-
-        <section class="settings-category">
-          <div class="settings-category-header">
-            <i class="ph ph-play-circle"></i>
-            <span>Playback</span>
-          </div>
-          <div class="settings-row-toggle">
-            <div class="settings-row-text">
-              <p class="settings-row-title">Auto Skip Intro</p>
-              <p class="settings-row-desc">Automatically jump past the opening once it's detected.</p>
-            </div>
-            <button class="toggle-switch" id="toggle-autoskip-settings" role="switch" aria-checked="false" aria-label="Toggle Auto Skip Intro">
-              <span class="toggle-knob"></span>
-            </button>
-          </div>
-        </section>
-
-        <section class="settings-category">
-          <div class="settings-category-header">
-            <i class="ph ph-radar"></i>
-            <span>Detection</span>
-          </div>
-          <p class="settings-row-desc settings-static-desc">
-            SkipSensei tries AniSkip first, then Open Anime Timestamps, then falls back to a manual mark you set on-page.
-          </p>
-          <div class="detection-last-match" id="detection-last-match" hidden>
-            <i class="ph-fill ph-check-circle"></i>
-            <span id="detection-last-match-text">—</span>
-          </div>
-        </section>
-
-        <section class="settings-category">
-          <div class="settings-category-header">
-            <i class="ph ph-palette"></i>
-            <span>Appearance</span>
-          </div>
-          <div class="settings-row-toggle">
-            <div class="settings-row-text">
-              <p class="settings-row-title">Dark Mode</p>
-              <p class="settings-row-desc">Same accent, flipped surface — synced with the header toggle.</p>
-            </div>
-            <button class="toggle-switch" id="toggle-theme-settings" role="switch" aria-checked="true" aria-label="Toggle dark mode">
-              <span class="toggle-knob"></span>
-            </button>
-          </div>
-        </section>
-
-        <section class="settings-category">
-          <div class="settings-category-header">
-            <i class="ph ph-globe"></i>
-            <span>Supported Sites</span>
-          </div>
-          <ul class="site-list" id="settings-site-list"></ul>
-        </section>
-
-        <section class="settings-category">
-          <div class="settings-category-header">
-            <i class="ph ph-wrench"></i>
-            <span>Advanced</span>
-          </div>
-          <button class="btn-settings-action" id="btn-reset-stats">
-            <i class="ph ph-arrow-counter-clockwise"></i>
-            <span>
-              <span class="btn-settings-action-title">Reset statistics</span>
-              <span class="btn-settings-action-desc">Clears stats, history, streaks and favorites — not manual timings.</span>
-            </span>
-          </button>
-          <button class="btn-settings-action" id="btn-clear-cache">
-            <i class="ph ph-broom"></i>
-            <span>
-              <span class="btn-settings-action-title">Clear resolution cache</span>
-              <span class="btn-settings-action-desc">Wipes cached MAL/AniDB matches — use if a series ever resolves wrong.</span>
-            </span>
-          </button>
-        </section>
-
-        <section class="settings-category" id="settings-about">
-          <div class="settings-category-header">
-            <i class="ph ph-info"></i>
-            <span>About</span>
-          </div>
-          <p class="settings-row">
-            <span>Version</span>
-            <span class="settings-value" id="settings-version-value">—</span>
-          </p>
-          <div class="support-card">
-            <i class="ph-fill ph-heart support-icon"></i>
-            <div>
-              <p class="support-title">Support SkipSensei</p>
-              <p class="support-desc">Donations aren't set up yet — this'll be the place, once they are.</p>
-            </div>
-          </div>
-        </section>
-
+    <!-- Support: full-panel swap, opened by the header heart button instead
+         of jumping into Settings and scrolling to its About section. The
+         same support-card also stays put at the bottom of Settings (see
+         #settings-about below) — this is an additional shortcut to it, not
+         a replacement. -->
+    <div class="card view-detail" id="support-panel" hidden>
+      <div class="view-detail-header">
+        <div class="view-detail-heading">
+          <p class="view-detail-title">Support SkipSensei</p>
+          <p class="view-detail-subtitle">Help keep the project going</p>
+        </div>
+        <button class="icon-btn" id="btn-close-support" aria-label="Close Support SkipSensei">
+          <i class="ph ph-x"></i>
+        </button>
+      </div>
+      <div class="support-card">
+        <i class="ph-fill ph-heart support-icon"></i>
+        <div>
+          <p class="support-title">Support the project</p>
+          <p class="support-desc">Donations aren't set up yet — this'll be the place, once they are.</p>
+        </div>
       </div>
     </div>
 
@@ -232,10 +187,9 @@
 
       <!-- Quick Actions -->
       <section class="card tabs-card">
-        <button class="action-tab" data-tab="shortcuts">
+        <button class="action-tab" id="tab-shortcuts">
           <i class="ph ph-keyboard tab-icon"></i>
           <span class="tab-label">Shortcuts</span>
-          <span class="tab-soon">Soon</span>
           <i class="ph ph-caret-right tab-chevron"></i>
         </button>
         <button class="action-tab" id="tab-manual-timings">
@@ -347,6 +301,106 @@
 
     </div>
 
+    <div class="view-panel" data-view-panel="settings" hidden>
+
+      <section class="card settings-category">
+        <div class="settings-category-header">
+          <i class="ph ph-play-circle"></i>
+          <span>Playback</span>
+        </div>
+        <div class="settings-row-toggle">
+          <div class="settings-row-text">
+            <p class="settings-row-title">Auto Skip Intro</p>
+            <p class="settings-row-desc">Automatically jump past the opening once it's detected.</p>
+          </div>
+          <button class="toggle-switch" id="toggle-autoskip-settings" role="switch" aria-checked="false" aria-label="Toggle Auto Skip Intro">
+            <span class="toggle-knob"></span>
+          </button>
+        </div>
+      </section>
+
+      <section class="card settings-category">
+        <div class="settings-category-header">
+          <i class="ph ph-radar"></i>
+          <span>Detection</span>
+        </div>
+        <p class="settings-row-desc settings-static-desc">
+          SkipSensei tries AniSkip first, then Open Anime Timestamps, then falls back to a manual mark you set on-page.
+        </p>
+        <div class="detection-last-match" id="detection-last-match" hidden>
+          <i class="ph-fill ph-check-circle"></i>
+          <span id="detection-last-match-text">—</span>
+        </div>
+      </section>
+
+      <section class="card settings-category">
+        <div class="settings-category-header">
+          <i class="ph ph-palette"></i>
+          <span>Appearance</span>
+        </div>
+        <div class="settings-row-toggle">
+          <div class="settings-row-text">
+            <p class="settings-row-title">Dark Mode</p>
+            <p class="settings-row-desc">Same accent, flipped surface — synced with the header toggle.</p>
+          </div>
+          <button class="toggle-switch" id="toggle-theme-settings" role="switch" aria-checked="true" aria-label="Toggle dark mode">
+            <span class="toggle-knob"></span>
+          </button>
+        </div>
+      </section>
+
+      <section class="card settings-category">
+        <div class="settings-category-header">
+          <i class="ph ph-globe"></i>
+          <span>Supported Sites</span>
+        </div>
+        <ul class="site-list" id="settings-site-list"></ul>
+      </section>
+
+      <section class="card settings-category">
+        <div class="settings-category-header">
+          <i class="ph ph-wrench"></i>
+          <span>Advanced</span>
+        </div>
+        <button class="btn-settings-action" id="btn-reset-stats">
+          <i class="ph ph-arrow-counter-clockwise"></i>
+          <span>
+            <span class="btn-settings-action-title">Reset statistics</span>
+            <span class="btn-settings-action-desc">Clears stats, history, streaks and favorites — not manual timings.</span>
+          </span>
+        </button>
+        <button class="btn-settings-action" id="btn-clear-cache">
+          <i class="ph ph-broom"></i>
+          <span>
+            <span class="btn-settings-action-title">Clear resolution cache</span>
+            <span class="btn-settings-action-desc">Wipes cached MAL/AniDB matches — use if a series ever resolves wrong.</span>
+          </span>
+        </button>
+      </section>
+
+      <section class="card settings-category" id="settings-about">
+        <div class="settings-category-header">
+          <i class="ph ph-info"></i>
+          <span>About</span>
+        </div>
+        <p class="settings-row">
+          <span>Version</span>
+          <span class="settings-value" id="settings-version-value">—</span>
+        </p>
+        <div class="support-card">
+          <i class="ph-fill ph-heart support-icon"></i>
+          <div>
+            <p class="support-title">Support the project</p>
+            <p class="support-desc">Donations aren't set up yet — this'll be the place, once they are.</p>
+          </div>
+        </div>
+      </section>
+
+    </div>
+
+    </div>
+    <!-- /.popup-content -->
+
     <!-- Bottom navigation -->
     <nav class="bottom-nav">
       <button class="nav-item is-active" data-nav="dashboard">
@@ -358,6 +412,11 @@
         <span class="nav-indicator"></span>
         <i class="ph ph-chart-bar"></i>
         <span>Stats</span>
+      </button>
+      <button class="nav-item" data-nav="settings">
+        <span class="nav-indicator"></span>
+        <i class="ph ph-gear"></i>
+        <span>Settings</span>
       </button>
     </nav>
 

@@ -29,7 +29,6 @@
         "*://*.voiranime.rip/*"
       ],
       "js": ["resolution.js", "content.js"],
-      "css": ["content.css"],
       "run_at": "document_idle"
     },
     {

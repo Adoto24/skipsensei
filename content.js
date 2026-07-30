@@ -35,6 +35,16 @@ if (window.__animeSkipIntroInjected) {
   // (et ignorer tous les autres messages qui pourraient circuler sur la page).
   const CANAL = "anime-skip-intro";
 
+  // Keyboard shortcuts (new) — see gestionnaireClavier near the bottom of
+  // this file. Plain letter keys, no modifier: kept in one place so they're
+  // easy to change later. Case-insensitive (event.key lower-cased before
+  // lookup), so Shift+<key> also works.
+  const RACCOURCIS_CLAVIER = {
+    s: "skip-intro",
+    m: "marquer-fin",
+    a: "toggle-auto-skip",
+  };
+
   // Safety-net poll only now (see the "change" listener + MutationObserver
   // set up at the bottom of this file): most iframe/episode changes are
   // caught immediately, so this just guards against anything that slips
@@ -89,6 +99,24 @@ if (window.__animeSkipIntroInjected) {
   const STORAGE_KEY_FAVORIS_SITES = "asi-fav-sites"; // { [site]: skipCount }
   const STORAGE_KEY_RECORD = "asi-record"; // { secondes, serie, episode, horodatage } — longest single skip ever
 
+  // Bug fix (see resoudreAniDbId/assurerPosterEnCache below): both of these
+  // were referenced already but never actually declared anywhere content.js
+  // could see them, which threw a ReferenceError the moment either function
+  // ran — resoudreAniDbId every time AniSkip had no data (breaking the Open
+  // Anime Timestamps fallback entirely for that episode) and
+  // assurerPosterEnCache on every manual "Skip Intro" click (the actual
+  // cause of Recently Skipped's missing posters for clicked, non-auto
+  // skips — see enregistrerSkip). player-frame.js has its own valid copy of
+  // STORAGE_PREFIX_POSTER (separate document/scope, the iframe), which is
+  // why auto-skip-recorded posters were unaffected.
+  const STORAGE_PREFIX_ANIDBID = "asi-anidbid::"; // per MAL id -> AniDB id
+  const STORAGE_PREFIX_POSTER = "asi-poster::"; // per MAL id -> { url, cachedAt }
+  // A failed Jikan poster lookup (rate-limit, timeout, network error) is
+  // retried after this TTL instead of being cached as a permanent null —
+  // see assurerPosterEnCache. A *successful* lookup has no TTL: Jikan's
+  // poster URL for a given anime doesn't change, so it's cached forever.
+  const POSTER_ECHEC_TTL_MS = 24 * 60 * 60 * 1000; // 24h
+
   // Tracks AniSkip attempts per (série, épisode) key so the polling loop
   // (every 2s) doesn't hammer the API. Two kinds of "no result" are
   // treated differently:
@@ -126,7 +154,6 @@ if (window.__animeSkipIntroInjected) {
   // also persists it to chrome.storage.local across page loads.
   let datasetOpenAnimeTimestampsEnMemoire = null;
 
-  let boutonActuel = null;
   let serieActuelle = null;
   let nomSerieBaseActuelle = null;
   let saisonActuelle = null;
@@ -246,14 +273,17 @@ if (window.__animeSkipIntroInjected) {
 
   /**
    * Looks up and caches a poster image URL for a MAL id (new), so the
-   * popup's "Recently Skipped" list can show real cover art. Only runs
-   * once per malId — chrome.storage.local already holding a
-   * STORAGE_PREFIX_POSTER entry for it (even a failed lookup, url: null)
-   * is treated as "already looked up" and skipped, since Jikan's rate
-   * limit (60 req/min) can't take a fresh request on every single skip
-   * event for the same series. Never awaited by its caller: a slow or
-   * failing Jikan request must never block/delay recording the skip
-   * itself, only the popup thumbnail is affected.
+   * popup's "Recently Skipped" list can show real cover art. A successful
+   * lookup is cached permanently — Jikan's poster URL for a given anime
+   * doesn't change. A *failed* lookup (network error, timeout, Jikan
+   * rate-limit, non-ok response) is cached too, but only for
+   * POSTER_ECHEC_TTL_MS: without that, a single transient failure the
+   * first time a given malId was ever looked up (e.g. Jikan's 60/min rate
+   * limit during a binge session) would permanently blank that anime's
+   * poster for every future skip, with no automatic recovery. Never
+   * awaited by its caller: a slow or failing Jikan request must never
+   * block/delay recording the skip itself, only the popup thumbnail is
+   * affected.
    */
   async function assurerPosterEnCache(malId) {
     if (malId == null) return;
@@ -261,7 +291,10 @@ if (window.__animeSkipIntroInjected) {
     const cle = `${STORAGE_PREFIX_POSTER}${malId}`;
     try {
       const cache = await storageGet([cle]);
-      if (cle in cache) return; // already looked up, success or confirmed failure
+      const entree = cache[cle];
+      if (entree && (entree.url || Date.now() - entree.cachedAt < POSTER_ECHEC_TTL_MS)) {
+        return; // a real url (permanent), or a recent-enough failure (still in cooldown)
+      }
 
       let url = null;
       try {
@@ -291,7 +324,6 @@ if (window.__animeSkipIntroInjected) {
     const iframe = trouverIframeLecteur();
 
     if (!iframe) {
-      retirerBouton();
       serieActuelle = null;
       nomSerieBaseActuelle = null;
       saisonActuelle = null;
@@ -311,7 +343,7 @@ if (window.__animeSkipIntroInjected) {
     // s'appliquerait par erreur à l'autre (même bug que celui corrigé côté
     // malId dans resoudreMalIdEtEpisode, juste côté cache local).
     const nomSerie = saison > 1 ? `${nomSerieBase} (saison ${saison})` : nomSerieBase;
-    const memeContexte = nomSerie === serieActuelle && episode === episodeActuel && boutonActuel;
+    const memeContexte = nomSerie === serieActuelle && episode === episodeActuel;
     nomSerieBaseActuelle = nomSerieBase;
     saisonActuelle = saison;
 
@@ -781,7 +813,6 @@ if (window.__animeSkipIntroInjected) {
     const cache = await storageGet([cle]);
     const manuel = cache[cle];
     if (manuel && manuel.source === "manual" && typeof manuel.fin === "number") {
-      afficherPanneau(iframe, nomSerie, episode, manuel);
       return manuel;
     }
 
@@ -795,95 +826,52 @@ if (window.__animeSkipIntroInjected) {
       if (timing) cacheTimingAutoEnMemoire.set(cle, timing);
     }
 
-    afficherPanneau(iframe, nomSerie, episode, timing);
     return timing && typeof timing.fin === "number" ? timing : null;
   }
 
-  function retirerBouton() {
-    const conteneur = document.getElementById("asi-floating-container");
-    if (conteneur) conteneur.remove();
-    boutonActuel = null;
-  }
-
   /**
-   * Builds the on-page floating panel: just the action button — "Skip
-   * Intro" when timing data is available, or "Marquer fin d'intro" as
-   * the manual fallback otherwise. No series/episode title and no
-   * auto-skip switch here anymore: the auto-skip toggle already lives
-   * in the popup (chrome.storage.local["asi-settings"]), duplicating
-   * it on-page just added a second control for the same setting.
+   * Saves a manually-marked intro end time for (nomSerie, episode) — same
+   * shape/semantics as before (see resoudreEtAfficher's "manual" branch):
+   * a permanent override, `debut` preserved from any prior manual entry
+   * (defaults to 0 the first time). Called from the "mark-intro-end"
+   * message below, sent by player-frame.js's own button (moved there —
+   * see the architectural note on that button's message handlers further
+   * down) instead of a click handler content.js used to own directly.
    */
-  function afficherPanneau(iframe, nomSerie, episode, timing) {
-    retirerBouton();
-
-    const conteneur = document.createElement("div");
-    conteneur.id = "asi-floating-container";
-
-    const bouton = document.createElement("button");
-    bouton.id = "asi-floating-button";
-    conteneur.appendChild(bouton);
-
-    document.body.appendChild(conteneur);
-    boutonActuel = bouton;
-
-    if (timing && typeof timing.fin === "number") {
-      bouton.textContent = "⏭ Skip Intro";
-      bouton.addEventListener("click", () => {
-        iframe.contentWindow.postMessage({ canal: CANAL, type: "seek", time: timing.fin }, "*");
-        const secondesGagnees = typeof timing.debut === "number" ? timing.fin - timing.debut : 0;
-        enregistrerSkip(nomSerie, episode, secondesGagnees, "clic", timing.malId, obtenirAdaptateur().nomSite || null);
-      });
-    } else {
-      bouton.textContent = "🏁 Marquer fin d'intro";
-      bouton.addEventListener("click", async () => {
-        if (!contexteValide()) {
-          avertirContexteInvalide();
-          alert("L'extension a été mise à jour. Rafraîchis cette page (F5) pour continuer à l'utiliser.");
-          return;
-        }
-
-        let reponse;
-        try {
-          reponse = await envoyerMessageAuLecteur(iframe, { type: "get-current-time" }, "current-time");
-        } catch (erreur) {
-          console.warn("[SkipSensei]", erreur.message);
-          alert(
-            "Impossible de récupérer le temps de la vidéo. " +
-            "Essaie de changer de lecteur (Lecteur 1/2/3) ou attends que la vidéo soit bien chargée."
-          );
-          return;
-        }
-
-        const cle = cleTiming(nomSerie, episode);
-
-        try {
-          const cache = await storageGet([cle]);
-          const ancienTiming = cache[cle] || { debut: 0 };
-
-          const nouveauTiming = {
-            debut: ancienTiming.debut ?? 0,
-            fin: reponse.time,
-            source: "manual",
-          };
-
-          await storageSet({ [cle]: nouveauTiming });
-          console.log(
-            `[SkipSensei] Timing enregistré pour "${nomSerie}" (ép. ${episode}) :`,
-            nouveauTiming
-          );
-          timingActuel = nouveauTiming;
-          afficherPanneau(iframe, nomSerie, episode, nouveauTiming);
-        } catch (erreur) {
-          // contexteValide() was true a few lines up but the extension
-          // could have been reloaded in the meantime (click → await →
-          // reload race); storageGet/storageSet already logged the clear
-          // message via avertirContexteInvalide() in that case.
-          if (contexteValide()) console.error("[SkipSensei] Échec de l'enregistrement du timing :", erreur);
-        }
-      });
+  async function enregistrerTimingManuel(nomSerie, episode, time) {
+    if (!contexteValide()) {
+      avertirContexteInvalide();
+      alert("L'extension a été mise à jour. Rafraîchis cette page (F5) pour continuer à l'utiliser.");
+      return;
     }
 
-    return bouton;
+    const cle = cleTiming(nomSerie, episode);
+    try {
+      const cache = await storageGet([cle]);
+      const ancienTiming = cache[cle] || { debut: 0 };
+
+      const nouveauTiming = {
+        debut: ancienTiming.debut ?? 0,
+        fin: time,
+        source: "manual",
+      };
+
+      await storageSet({ [cle]: nouveauTiming });
+      console.log(`[SkipSensei] Timing enregistré pour "${nomSerie}" (ép. ${episode}) :`, nouveauTiming);
+      timingActuel = nouveauTiming;
+      // No explicit re-render call needed: this storageSet triggers the
+      // chrome.storage.onChanged listener at the bottom of this file
+      // (matching cleTiming(serieActuelle, episodeActuel)), which re-runs
+      // verifierPageEtMettreAJourUI and pushes the updated timing to
+      // player-frame.js via the normal envoyerDonneesAutoSkip poll tick —
+      // same path a popup-side edit already used.
+    } catch (erreur) {
+      // contexteValide() was true a few lines up but the extension could
+      // have been reloaded in the meantime (message → await → reload
+      // race); storageGet/storageSet already logged the clear message via
+      // avertirContexteInvalide() in that case.
+      if (contexteValide()) console.error("[SkipSensei] Échec de l'enregistrement du timing :", erreur);
+    }
   }
 
   /**
@@ -969,6 +957,41 @@ if (window.__animeSkipIntroInjected) {
       "*"
     );
   }
+
+  // ------------------------------------------------------------
+  // Floating button bridge (new — architectural change). The Netflix-style
+  // floating button is now rendered by player-frame.js INSIDE the player
+  // iframe's own document, not by this script on the parent page: a
+  // button appended to document.body here physically cannot appear "over"
+  // the video once that video's cross-origin iframe goes fullscreen (only
+  // the fullscreen element's own subtree renders), and Netflix-style
+  // positioning relative to the video needs the video's own layout anyway.
+  // content.js still owns resolving the timing (via envoyerDonneesAutoSkip
+  // above) and recording "clic" skips/manual marks (enregistrerSkip /
+  // enregistrerTimingManuel) — the button in the iframe just reports the
+  // user's action back here for that bookkeeping, via this listener.
+  // ------------------------------------------------------------
+  window.addEventListener("message", (event) => {
+    const donnees = event.data;
+    if (!donnees || donnees.canal !== CANAL) return;
+
+    if (donnees.type === "skip-performed") {
+      enregistrerSkip(
+        serieActuelle,
+        episodeActuel,
+        donnees.secondesGagnees,
+        "clic",
+        timingActuel?.malId,
+        obtenirAdaptateur().nomSite || null
+      );
+      return;
+    }
+
+    if (donnees.type === "mark-intro-end") {
+      enregistrerTimingManuel(serieActuelle, episodeActuel, donnees.time);
+      return;
+    }
+  });
 
   // ------------------------------------------------------------
   // Popup <-> content script bridge (new). This is a completely
@@ -1075,6 +1098,57 @@ if (window.__animeSkipIntroInjected) {
     childList: true,
     subtree: true,
   });
+
+  // ------------------------------------------------------------
+  // Keyboard shortcuts (new): S / M / A, see RACCOURCIS_CLAVIER at the
+  // top of this file. Deliberately reuse the exact same code paths as
+  // their on-page/popup equivalents instead of duplicating the logic:
+  // - S/M ask player-frame.js to run the exact same click handler its own
+  //   floating button uses (the button now lives inside the player
+  //   iframe — see the architectural note near envoyerDonneesAutoSkip —
+  //   so triggering it from here means posting a message, not calling
+  //   .click() on a local element).
+  // - A writes STORAGE_KEY_SETTINGS the same way the popup's toggle does,
+  //   so every surface (popup, player-frame.js auto-skip loop) picks up
+  //   the change exactly as if the popup toggle had been clicked.
+  // ------------------------------------------------------------
+  function cibleEstEditable(cible) {
+    if (!cible) return false;
+    const tag = cible.tagName;
+    return tag === "INPUT" || tag === "TEXTAREA" || cible.isContentEditable === true;
+  }
+
+  async function basculerAutoSkipDepuisRaccourci() {
+    const parametres = await storageGet([STORAGE_KEY_SETTINGS]);
+    const actif = parametres[STORAGE_KEY_SETTINGS]?.autoSkipEnabled ?? true;
+    await storageSet({ [STORAGE_KEY_SETTINGS]: { autoSkipEnabled: !actif } });
+  }
+
+  function gestionnaireClavier(event) {
+    // Only active while a supported site's player iframe is actually on
+    // screen — trouverIframeLecteur() returning null means there's
+    // nothing to act on.
+    if (event.altKey || event.ctrlKey || event.metaKey) return;
+    if (cibleEstEditable(event.target)) return;
+
+    const iframe = trouverIframeLecteur();
+    if (!iframe) return;
+
+    const action = RACCOURCIS_CLAVIER[event.key?.toLowerCase()];
+    if (!action) return;
+
+    const timingResolu = timingActuel && typeof timingActuel.fin === "number";
+
+    if (action === "skip-intro") {
+      if (timingResolu) iframe.contentWindow.postMessage({ canal: CANAL, type: "trigger-skip" }, "*");
+    } else if (action === "marquer-fin") {
+      if (!timingResolu) iframe.contentWindow.postMessage({ canal: CANAL, type: "trigger-mark" }, "*");
+    } else if (action === "toggle-auto-skip") {
+      basculerAutoSkipDepuisRaccourci();
+    }
+  }
+
+  document.addEventListener("keydown", gestionnaireClavier);
 
   // ------------------------------------------------------------
   // React immediately when the saved timing for the episode currently

@@ -208,6 +208,17 @@ function afficherToast(titre, sousTitre = null, { icone = "ph-fill ph-check-circ
 // nav (so nothing duplicates what the detail panel itself shows), and
 // only one detail panel is ever open at a time.
 // ------------------------------------------------------------
+/**
+ * Scrolls #popup-content back to the top. Needed because every tab/detail
+ * panel shares that one scroll container (see popup.css .popup-content) —
+ * without this, switching from a tab scrolled halfway down to a shorter
+ * one would land already scrolled (clamped to that panel's own max), not
+ * at its top.
+ */
+function remonterPopupContent() {
+  document.getElementById("popup-content")?.scrollTo({ top: 0 });
+}
+
 function creerPanneauDetail(panelEl, { onOpen } = {}) {
   const viewPanels = document.querySelectorAll(".view-panel");
   const bottomNav = document.querySelector(".bottom-nav");
@@ -219,6 +230,7 @@ function creerPanneauDetail(panelEl, { onOpen } = {}) {
     panelEl.hidden = false;
     viewPanels.forEach((vp) => (vp.hidden = true));
     if (bottomNav) bottomNav.hidden = true;
+    remonterPopupContent();
     onOpen?.();
   }
 
@@ -228,76 +240,49 @@ function creerPanneauDetail(panelEl, { onOpen } = {}) {
     const cible = navActif?.dataset.nav || "dashboard";
     viewPanels.forEach((vp) => (vp.hidden = vp.dataset.viewPanel !== cible));
     if (bottomNav) bottomNav.hidden = false;
+    remonterPopupContent();
   }
 
   return { ouvrir, fermer };
 }
 
 /**
- * Wires Settings and Manual Timings as the two detail panels, plus every
- * button that can open/close them: the gear (dual-purpose — becomes a
- * "back to dashboard" button while Settings is open, the only way back),
- * the header heart (opens Settings and jumps straight to the About/Support
- * section), and the Manual Timings quick-action tab.
+ * Wires Manual Timings, Keyboard Shortcuts and Support as the three detail
+ * panels, the last opened by the header heart button as its own full-panel
+ * view instead of jumping into the Settings tab. Settings keeps its own
+ * copy of the same support-card in its About section (#settings-about) —
+ * this button is now a shortcut to a dedicated view, not a replacement
+ * for it. Settings itself is no longer a detail-panel overlay — it's a
+ * real bottom-nav destination, see initBottomNav/basculerVersOnglet.
  */
 function initDetailPanels() {
-  const settingsPanelEl = document.getElementById("settings-panel");
   const timingsPanelEl = document.getElementById("manual-timings-panel");
-  if (!settingsPanelEl || !timingsPanelEl) return;
+  const shortcutsPanelEl = document.getElementById("shortcuts-panel");
+  const supportPanelEl = document.getElementById("support-panel");
+  if (!timingsPanelEl) return;
 
-  const gearBtn = document.getElementById("btn-settings");
-  const gearIcon = gearBtn?.querySelector("i");
-  const closeSettingsBtn = document.getElementById("btn-close-settings");
   const supportBtn = document.getElementById("btn-support");
+  const closeSupportBtn = document.getElementById("btn-close-support");
   const tabManualTimings = document.getElementById("tab-manual-timings");
   const closeTimingsBtn = document.getElementById("btn-close-manual-timings");
+  const tabShortcuts = document.getElementById("tab-shortcuts");
+  const closeShortcutsBtn = document.getElementById("btn-close-shortcuts");
 
   const { recharger: rechargerTimings } = initSavedTimingsList();
   initAdvancedActions();
 
-  const settings = creerPanneauDetail(settingsPanelEl, {
-    onOpen: () => {
-      initSupportedSitesList();
-      mettreAJourDetectionSettings(dernierReponseConnue);
-      if (gearIcon) gearIcon.classList.replace("ph-gear", "ph-house");
-      if (gearBtn) {
-        gearBtn.title = "Home";
-        gearBtn.setAttribute("aria-label", "Back to Dashboard");
-      }
-    },
-  });
   const timings = creerPanneauDetail(timingsPanelEl, { onOpen: rechargerTimings });
+  const shortcuts = shortcutsPanelEl ? creerPanneauDetail(shortcutsPanelEl) : null;
+  const support = supportPanelEl ? creerPanneauDetail(supportPanelEl) : null;
 
-  function reinitialiserIconeGear() {
-    if (gearIcon) gearIcon.classList.replace("ph-house", "ph-gear");
-    if (gearBtn) {
-      gearBtn.title = "Settings";
-      gearBtn.setAttribute("aria-label", "Settings");
-    }
-  }
-
-  gearBtn?.addEventListener("click", () => {
-    if (settingsPanelEl.hidden) {
-      settings.ouvrir();
-    } else {
-      settings.fermer();
-      reinitialiserIconeGear();
-    }
-  });
-  closeSettingsBtn?.addEventListener("click", () => {
-    settings.fermer();
-    reinitialiserIconeGear();
-  });
-
-  supportBtn?.addEventListener("click", () => {
-    settings.ouvrir();
-    requestAnimationFrame(() => {
-      document.getElementById("settings-about")?.scrollIntoView({ behavior: "smooth", block: "start" });
-    });
-  });
+  supportBtn?.addEventListener("click", () => support?.ouvrir());
+  closeSupportBtn?.addEventListener("click", () => support?.fermer());
 
   tabManualTimings?.addEventListener("click", () => timings.ouvrir());
   closeTimingsBtn?.addEventListener("click", () => timings.fermer());
+
+  tabShortcuts?.addEventListener("click", () => shortcuts?.ouvrir());
+  closeShortcutsBtn?.addEventListener("click", () => shortcuts?.fermer());
 }
 
 /**
@@ -505,6 +490,15 @@ function initAutoSkipToggles() {
       appliquerEtat(nouvelEtat);
       chrome.storage.local.set({ [STORAGE_KEY_SETTINGS]: { autoSkipEnabled: nouvelEtat } });
     });
+  });
+
+  // New: pick up the "A" keyboard shortcut (content.js) toggling the same
+  // storage key while the popup happens to be open at the same time —
+  // without this, the popup's own toggle would silently disagree with the
+  // page's until the popup was closed and reopened.
+  chrome.storage.onChanged.addListener((changements, zone) => {
+    if (zone !== "local" || !changements[STORAGE_KEY_SETTINGS]) return;
+    appliquerEtat(changements[STORAGE_KEY_SETTINGS].newValue?.autoSkipEnabled ?? true);
   });
 }
 
@@ -1039,45 +1033,47 @@ async function initStatsPage() {
 }
 
 // ------------------------------------------------------------
-// Quick Actions: Shortcuts/Contribute have no real destination yet (see
-// README for what's actually implemented) — labeled "Soon" on the tab
-// itself (popup.html) and a toast on click. Manual Timings is wired in
-// initDetailPanels above, since it opens a real panel, not a toast.
+// Quick Actions: Contribute has no real destination yet (see README for
+// what's actually implemented) — labeled "Soon" on the tab itself
+// (popup.html) and a toast on click. Shortcuts and Manual Timings both
+// open a real panel now, wired in initDetailPanels below.
 // ------------------------------------------------------------
 function initStaticTabs() {
-  const libelles = {
-    shortcuts: "Keyboard shortcuts — coming soon",
-    contribute: "Contributing — coming soon",
-  };
-
-  document.querySelectorAll('.action-tab[data-tab="shortcuts"], .action-tab[data-tab="contribute"]').forEach((tab) => {
+  document.querySelectorAll('.action-tab[data-tab="contribute"]').forEach((tab) => {
     tab.addEventListener("click", () => {
-      afficherToast(libelles[tab.dataset.tab] || "Coming soon");
+      afficherToast("Contributing — coming soon");
     });
   });
 }
 
 /**
- * Bottom navigation: shows the view-panel matching the clicked tab's
- * data-nav and hides the other one. Re-renders the Stats page on every
- * visit (cheap local reads) so its animated counters/charts feel fresh
- * rather than replaying stale numbers from when the popup first opened.
+ * Switches the active bottom-nav destination to `nomNav` ("dashboard" |
+ * "stats" | "settings") — shared by the nav-item click handlers below and
+ * by the header heart button (initDetailPanels), which jumps straight to
+ * the Settings tab instead of opening it as a separate overlay. Re-renders
+ * Stats/Settings' live bits on every visit (cheap local reads) so they
+ * feel fresh rather than replaying stale data from when the popup opened.
  */
+function basculerVersOnglet(nomNav) {
+  document.querySelectorAll(".nav-item").forEach((item) => {
+    item.classList.toggle("is-active", item.dataset.nav === nomNav);
+  });
+  document.querySelectorAll(".view-panel").forEach((panel) => {
+    panel.hidden = panel.dataset.viewPanel !== nomNav;
+  });
+  remonterPopupContent();
+
+  if (nomNav === "stats") initStatsPage();
+  if (nomNav === "settings") {
+    initSupportedSitesList();
+    mettreAJourDetectionSettings(dernierReponseConnue);
+  }
+}
+
+/** Bottom navigation: Dashboard / Stats / Settings, see basculerVersOnglet. */
 function initBottomNav() {
-  const navItems = document.querySelectorAll(".nav-item");
-  const panels = document.querySelectorAll(".view-panel");
-
-  navItems.forEach((item) => {
-    item.addEventListener("click", () => {
-      navItems.forEach((other) => other.classList.remove("is-active"));
-      item.classList.add("is-active");
-
-      panels.forEach((panel) => {
-        panel.hidden = panel.dataset.viewPanel !== item.dataset.nav;
-      });
-
-      if (item.dataset.nav === "stats") initStatsPage();
-    });
+  document.querySelectorAll(".nav-item").forEach((item) => {
+    item.addEventListener("click", () => basculerVersOnglet(item.dataset.nav));
   });
 }
 
