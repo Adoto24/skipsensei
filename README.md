@@ -8,11 +8,28 @@ d'intro par série via un popup.
 
 Sur anime-sama.to, la vidéo n'est **pas** directement sur la page : elle
 est chargée dans une `<iframe id="playerDF">` qui pointe vers un site
-tiers différent selon le "Lecteur" choisi (Lecteur 1/2/3) :
+tiers différent selon le "Lecteur" choisi (Lecteur 1 à 5 selon les
+épisodes). Domaines observés sur anime-sama.to (VOSTFR et VF, plusieurs
+dizaines de séries) :
 
 - `vidmoly.to` / `vidmoly.biz`
 - `video.sibnet.ru`
 - `sendvid.com`
+- `ansembed.net`
+- `smoothpre.com`
+- `oneupload.to`
+- `lpayer.embed4me.com`
+- `movearnpre.com`
+- `uqload.is`
+- `minochinos.com`
+- `www.myvi.top` / `www.myvi.tv`
+- `vk.com` / `vkvideo.ru` (chemin `/video_ext.php` seulement)
+
+Les trois premiers (vidmoly/sibnet/sendvid) sont les lecteurs "principaux"
+les plus fréquents ; les suivants apparaissent surtout comme lecteur de
+repli sur des épisodes ponctuels où le lecteur principal est indisponible
+— d'où l'intérêt de tous les couvrir plutôt que seulement les 3 les plus
+visibles.
 
 Un content script ne peut pas lire le contenu d'une iframe d'un **autre
 domaine** (sécurité du navigateur : same-origin policy). Il faut donc

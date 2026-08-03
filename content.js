@@ -55,7 +55,21 @@ if (window.__animeSkipIntroInjected) {
   // Domaines des lecteurs vidéo tiers connus (voir manifest.json, deuxième
   // content_scripts). Utilisé pour préférer un iframe reconnu plutôt que le
   // premier iframe trouvé sur la page, qui pourrait être une pub.
-  const DOMAINES_LECTEUR_CONNUS = ["vidmoly", "sibnet", "sendvid"];
+  const DOMAINES_LECTEUR_CONNUS = [
+    "vidmoly",
+    "sibnet",
+    "sendvid",
+    "ansembed",
+    "smoothpre",
+    "oneupload",
+    "embed4me",
+    "movearnpre",
+    "uqload",
+    "minochinos",
+    "myvi",
+    "vk.com",
+    "vkvideo",
+  ];
 
   // ------------------------------------------------------------
   // AniSkip integration (new).
