@@ -1,8 +1,15 @@
 # SkipSensei (extension Chrome — Manifest V3)
 
-Extension pour anime-sama.to qui affiche un bouton flottant "Skip Intro"
-sur les pages vidéo, et qui permet d'enregistrer/modifier les timings
-d'intro par série via un popup.
+Extension multi-site qui affiche un bouton flottant "Skip Intro" sur les
+pages vidéo, et qui permet d'enregistrer/modifier les timings d'intro par
+série via un popup.
+
+## Sites supportés
+
+| Site | Domaines matchés | Adaptateur (`content.js`) |
+| --- | --- | --- |
+| Anime-Sama | `anime-sama.to` | `extraireNomSerieAnimeSama` / `extraireEpisodeAnimeSama` |
+| VoirAnime | `voiranime.rip` | `extraireNomSerieVoiranime` / `extraireEpisodeVoiranime` |
 
 ## Pourquoi deux content scripts ?
 
@@ -129,11 +136,24 @@ stats/l'historique.
   second cas, aucun élément ne peut être injecté dedans, limitation du
   navigateur et non un bug de l'extension.
 
-## Si anime-sama.to ajoute/change un lecteur vidéo
+## Si un lecteur vidéo ajoute/change de domaine
 
-Si un jour "Lecteur 4" charge un nouveau domaine non listé, il suffit
-d'ajouter ce domaine au tableau `matches` du deuxième bloc
-`content_scripts` dans `manifest.json`, puis de recharger l'extension.
+Si un lecteur charge un nouveau domaine non listé, il suffit d'ajouter ce
+domaine au tableau `matches` du deuxième bloc `content_scripts` dans
+`manifest.json` (et à `DOMAINES_LECTEUR_CONNUS` dans `content.js` si on
+veut le préférer explicitement à un premier iframe trouvé), puis de
+recharger l'extension.
+
+## Si un site ajoute/change de domaine (miroir)
+
+1. Ajouter le domaine au premier bloc `content_scripts` de
+   `manifest.json` (page principale).
+2. Ajouter une entrée dans `ADAPTATEURS_SITE` (`content.js`), en
+   réutilisant l'objet adaptateur existant du site si c'est juste un
+   nouveau miroir.
+3. Recharger l'extension et vérifier sur un épisode réel que le nom de
+   série + le numéro d'épisode sont bien détectés (`console.log`
+   `[SkipSensei]` dans la console de l'onglet).
 
 ## Limites connues / pistes d'amélioration
 

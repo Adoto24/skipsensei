@@ -1,27 +1,16 @@
-/* ============================================================
-   resolution.js
-   ------------------------------------------------------------
-   Extracted from content.js (no behavior change) so the anime
-   resolution cascade — French-title normalization, malId matching,
-   the episode-count sanity check, and the absolute-episode-number
-   math for multi-season franchises — can be unit tested directly.
-
-   This is a PLAIN CLASSIC SCRIPT, not an ES module: Chrome MV3
-   content scripts declared in manifest.json's "content_scripts"
-   don't support "type": "module", so this relies on the same
-   mechanism multiple content-script files have always used to share
-   state — files listed in "js" all execute in one shared global
-   scope, in order. manifest.json lists this file BEFORE content.js,
-   so every top-level const/function declared here (storageGet,
-   fetchAvecTimeout, resoudreMalIdEtEpisode, etc.) is directly
-   callable from content.js exactly as if it were still declared
-   in the same file — no namespace, no import, nothing to change
-   at any call site.
-
-   The module.exports guard at the bottom only fires under Node
-   (i.e. in Vitest); "module" doesn't exist in a content script's
-   world, so the browser never touches that branch.
-   ============================================================ */
+// The anime resolution cascade — title normalization, malId matching,
+// episode-count sanity check, and absolute-episode-number math for
+// multi-season franchises — split out of content.js so it can be unit
+// tested directly.
+//
+// Plain classic script, not an ES module: MV3 content scripts don't
+// support "type": "module". manifest.json lists this file before
+// content.js, so everything declared here (storageGet, fetchAvecTimeout,
+// resoudreMalIdEtEpisode, etc.) executes in the same shared global scope
+// and is directly callable from content.js.
+//
+// The module.exports guard at the bottom only fires under Node (Vitest);
+// "module" doesn't exist in a content script's world.
 
   const ANISKIP_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
   const FETCH_TIMEOUT_MS = 8000;
@@ -29,39 +18,31 @@
   const ANILIST_GRAPHQL_URL = "https://graphql.anilist.co"; // fallback when Jikan search is down
 
   // Manual last-resort overrides for titles that still fail automated
-  // malId matching (see resoudreMalId) despite the AniList-first search +
-  // French-article normalization — checked BEFORE any API call. Keyed by
-  // the site's URL slug (voiranime.rip/{slug}/saison-x/episode-y/), NOT
-  // by the displayed title, since the slug is stable regardless of how
-  // the title gets scraped/mangled. Starts empty — fill in as bad matches
-  // are found, e.g.:
+  // malId matching, checked before any API call. Keyed by the site's URL
+  // slug (voiranime.rip/{slug}/saison-x/episode-y/), not the displayed
+  // title, since the slug is stable. Starts empty — fill in as bad
+  // matches are found, e.g.:
   //   "some-slug-from-the-url": 12345,
   const OVERRIDES_MALID = {};
 
   const STORAGE_PREFIX_MALID = "asi-malid::"; // per series (shared across episodes)
   // Per MAL id -> that entry's TV "Sequel" MAL id (or null), via Jikan's
-  // /relations endpoint. Used by resoudreMalIdEtEpisode (new) to walk from
-  // a show's first-season malId to whichever season is actually playing.
+  // /relations endpoint — walks from a show's first-season malId to
+  // whichever season is actually playing.
   const STORAGE_PREFIX_SEQUEL_MALID = "asi-sequelmalid::";
-  // Per nomSerieBase -> { comptes: { [numSaison]: nbEpisodes }, cachedAt }.
-  // Scraped from the anime's own root page on voiranime.rip (new) — for
-  // franchises with no per-season MAL split (see resoudreMalIdEtEpisode),
-  // this is what lets the site's per-season episode number be converted
-  // to MAL's absolute numbering.
+  // Per nomSerieBase -> { comptes: { [numSaison]: nbEpisodes }, cachedAt },
+  // scraped from the anime's own root page on voiranime.rip — lets a
+  // site's per-season episode number convert to MAL's absolute numbering
+  // for franchises with no per-season MAL split.
   const STORAGE_PREFIX_SAISONS = "asi-saisons::";
 
-  // ------------------------------------------------------------
-  // Promise wrappers around chrome.storage.local, plus the
-  // "extension context invalidated" guard they share.
-  // ------------------------------------------------------------
-  /**
-   * True once the extension has been reloaded/uninstalled while this
-   * content script instance is still alive on the page — chrome.runtime.id
-   * becomes undefined at that point, and any chrome.storage call after
-   * that throws "Extension context invalidated". There is no recovery
-   * from inside this script; only a real page reload gets a fresh,
-   * valid content script instance.
-   */
+  // chrome.storage.local promise wrappers + the "extension context
+  // invalidated" guard they share.
+
+  // True once the extension is reloaded/uninstalled while this content
+  // script instance is still alive — chrome.runtime.id becomes undefined,
+  // and any chrome.storage call afterward throws. Only a page reload
+  // recovers.
   function contexteValide() {
     return typeof chrome !== "undefined" && !!chrome.runtime?.id;
   }
@@ -104,54 +85,44 @@
     });
   }
 
-  /**
-   * Normalizes a title for comparison: strips accents, lowercases,
-   * collapses whitespace. Used to match the extracted series name
-   * against Jikan search results regardless of case/accents.
-   */
+  // Strips accents, lowercases, collapses whitespace — for matching the
+  // extracted series name against search results regardless of
+  // case/accents.
   function normaliserTitre(texte) {
     return (texte || "")
       .normalize("NFD")
-      .replace(/[\u0300-\u036f]/g, "")
+      .replace(/[̀-ͯ]/g, "")
       .toLowerCase()
       .replace(/\s+/g, " ")
       .trim();
   }
 
-  /**
-   * Builds the list of search-query variants to try against Jikan/AniList
-   * for a scraped (French) title (new), in order \u2014 stops at the first one
-   * that yields a confident match (see resoudreMalId).
-   *
-   * 1) The title with a leading space-delimited French article ("le ",
-   *    "la ", "les ", "un ", "une ") or apostrophed elision ("l'", "d'")
-   *    stripped, plus punctuation cleanup. Safe and unambiguous: it only
-   *    fires on those exact delimited prefixes, so "Dragon Ball" or "Log
-   *    Horizon" pass through untouched.
-   * 2) Only reached if (1) finds nothing: some French sites swallow the
-   *    apostrophe of an elision entirely \u2014 voiranime.rip's own <title>
-   *    renders "L'Attaque des Titans" as "LAttaque des Titans", gluing
-   *    the "L" directly onto the next word with no separator left to
-   *    detect. Confirmed live: searching AniList for "lattaque des
-   *    titans" returns zero results, but "attaque des titans" (the
-   *    leading "l" stripped) correctly top-ranks malId 16498 (Shingeki
-   *    no Kyojin / Attack on Titan). This variant is deliberately tried
-   *    SECOND, only as a fallback after (1) already failed: a title that
-   *    genuinely starts with L/D ("Log Horizon", "Death Note", "Dragon
-   *    Ball" \u2014 all confirmed live to resolve correctly on the first
-   *    variant) always finds its real match on attempt 1 and never
-   *    reaches this riskier attempt.
-   */
+  // Builds search-query variants to try against Jikan/AniList for a
+  // scraped French title, in order — stops at the first that yields a
+  // confident match (see resoudreMalId).
+  //
+  // 1) Leading French article ("le "/"la "/"les "/"un "/"une ") or elision
+  //    ("l'"/"d'") stripped, plus punctuation cleanup. Only fires on those
+  //    exact delimited prefixes, so e.g. "Dragon Ball" passes through
+  //    untouched.
+  // 2) Fallback only reached if (1) finds nothing: some French sites
+  //    swallow the apostrophe of an elision entirely — voiranime.rip
+  //    renders "L'Attaque des Titans" as "LAttaque des Titans". Confirmed
+  //    live: searching "lattaque des titans" returns nothing, but
+  //    "attaque des titans" (leading "l" stripped) correctly matches
+  //    malId 16498 (Attack on Titan). Tried second so a title that
+  //    genuinely starts with L/D ("Log Horizon", "Death Note") always
+  //    resolves on attempt 1 first.
   function genererVariantesRecherche(titre) {
     const nettoye = (titre || "")
-      .replace(/^(l['\u2019]|le\s+|la\s+|les\s+|d['\u2019]|un\s+|une\s+)/i, "")
+      .replace(/^(l['’]|le\s+|la\s+|les\s+|d['’]|un\s+|une\s+)/i, "")
       .replace(/[^\p{L}\p{N}\s]/gu, " ")
       .replace(/\s+/g, " ")
       .trim();
 
     const variantes = [nettoye];
 
-    const correspondanceElisionCollee = nettoye.match(/^([ld])([a-z\u00e0\u00e2\u00e4\u00e9\u00e8\u00ea\u00eb\u00ef\u00ee\u00f4\u00f6\u00f9\u00fb\u00fc\u00ff\u0153].+)/i);
+    const correspondanceElisionCollee = nettoye.match(/^([ld])([a-zàâäéèêëïîôöùûüÿœ].+)/i);
     if (correspondanceElisionCollee) {
       variantes.push(correspondanceElisionCollee[2]);
     }
@@ -159,11 +130,8 @@
     return variantes;
   }
 
-  /**
-   * fetch() with a hard timeout so a slow or dead API never blocks the
-   * rest of the extension — callers treat a timeout/error the same as
-   * "no data available" and fall back to manual marking.
-   */
+  // fetch() with a hard timeout so a slow/dead API never blocks the rest
+  // of the extension — callers treat a timeout/error like "no data".
   async function fetchAvecTimeout(url, options = {}, delaiMs = FETCH_TIMEOUT_MS) {
     const controleur = new AbortController();
     const timeoutId = setTimeout(() => controleur.abort(), delaiMs);
@@ -174,26 +142,21 @@
     }
   }
 
-  /**
-   * Picks the result whose title best matches the extracted series name
-   * (case/accent-insensitive, simple equals/includes check). Both Jikan
-   * and AniList already rank their search results by relevance, so if no
-   * title looks like a match we simply take the first result as the
-   * closest guess. Returns the raw matched item (not just its id) so
-   * callers can also read its episode count for verifierCoherenceMalId.
-   * `obtenirTitres` lets this be reused for both APIs, which don't share
-   * a response shape.
-   */
+  // Picks the result whose title best matches the series name
+  // (case/accent-insensitive). Jikan/AniList already rank by relevance,
+  // so absent a title match we take the first result. Returns the raw
+  // item (not just its id) so callers can read its episode count for
+  // verifierCoherenceMalId. `obtenirTitres` lets this be reused for both
+  // APIs' differing response shapes.
   function choisirMeilleureCorrespondance(resultats, nomSerie, obtenirTitres) {
     if (resultats.length === 0) return null;
 
     const cible = normaliserTitre(nomSerie);
     const titresDe = (item) => obtenirTitres(item).filter(Boolean).map(normaliserTitre);
 
-    // Two passes: an exact title match anywhere in the results must win
-    // over a mere substring match earlier in the (relevance-sorted) list
-    // — e.g. searching "one piece" shouldn't lock onto "One Piece: Stampede"
-    // just because it comes first and contains the target string.
+    // Exact match anywhere must win over a mere substring match earlier
+    // in the (relevance-sorted) list — e.g. "one piece" shouldn't lock
+    // onto "One Piece: Stampede" just because it comes first.
     const exact = resultats.find((item) => titresDe(item).some((t) => t === cible));
     if (exact) return exact;
 
@@ -203,7 +166,6 @@
     return resultats[0]; // closest guess: top search result
   }
 
-  /** MAL id + episode count lookup via Jikan's search endpoint. */
   async function resoudreMalIdViaJikan(nomSerie) {
     try {
       const url = `${JIKAN_SEARCH_URL}?q=${encodeURIComponent(nomSerie)}&limit=5`;
@@ -225,18 +187,13 @@
     }
   }
 
-  /**
-   * MAL id + episode count lookup via AniList's GraphQL search (new
-   * primary source, ahead of Jikan — see resoudreMalId). AniList's
-   * community-submitted synonyms give it noticeably better coverage of
-   * French/localized titles than MAL's own search, which only really
-   * indexes English/romaji/Japanese titles: confirmed live, searching
-   * Jikan or AniList for "L'Attaque des Titans" as scraped from
-   * voiranime.rip returns nothing useful until the title is normalized
-   * (see genererVariantesRecherche) — AniList's fuzzy ranking is also
-   * what actually lands on the right entry once normalized, not just an
-   * exact synonym match.
-   */
+  // AniList search, tried first (see resoudreMalId): its community
+  // synonyms give noticeably better coverage of French/localized titles
+  // than MAL's own search, which mostly indexes English/romaji/Japanese —
+  // confirmed live, "L'Attaque des Titans" as scraped from voiranime.rip
+  // returns nothing on either API until normalized (see
+  // genererVariantesRecherche), and AniList's fuzzy ranking is what lands
+  // on the right entry once it is.
   async function resoudreMalIdViaAniList(nomSerie) {
     const requete = `query ($s: String) { Page(perPage: 5) { media(search: $s, type: ANIME) { idMal episodes title { romaji english native } synonyms } } }`;
 
@@ -265,20 +222,12 @@
     }
   }
 
-  /**
-   * Sanity-checks a resolved malId against metadata already scraped from
-   * the site itself (new) — episode count. AniSkip lookups otherwise
-   * apply a wrong-but-confident-looking match silently (the exact failure
-   * mode this whole malId resolution has been fought against). Rejects
-   * (returns null, logs a warning) only when the candidate's own episode
-   * count is SMALLER than what the site lists for Saison 1 alone — e.g. a
-   * search landing on a 1-episode movie/short instead of the real TV
-   * series. Deliberately one-directional (never rejects for having MORE
-   * episodes than Saison 1): a single continuous MAL entry spanning every
-   * site season (One Piece-style — see resoudreMalIdEtEpisode) legitimately
-   * has far more episodes than Saison 1 alone, and that shape must not be
-   * flagged as wrong.
-   */
+  // Sanity-checks a resolved malId against the site's own scraped episode
+  // count, to catch a wrong-but-confident match (e.g. landing on a
+  // 1-episode movie instead of the real TV series). Only rejects when the
+  // candidate has FEWER episodes than the site lists for Saison 1 alone —
+  // never for having more, since a single continuous MAL entry spanning
+  // every site season (One Piece-style) legitimately has far more.
   async function verifierCoherenceMalId(malId, episodesCandidat, urlRacine, nomSerieBase) {
     if (episodesCandidat == null || !urlRacine) return malId; // rien à comparer
 
@@ -301,20 +250,14 @@
     return malId;
   }
 
-  /**
-   * Resolves a MyAnimeList ID for a series (new signature: also takes the
-   * site's URL slug + root page URL, see resoudreMalIdEtEpisode). Order of
-   * precedence:
-   *  0) OVERRIDES_MALID, keyed by slug — checked before any network call.
-   *  1) AniList search (better French-title/synonym coverage than Jikan
-   *     — see resoudreMalIdViaAniList), tried across every search-query
-   *     variant from genererVariantesRecherche.
-   *  2) Jikan search, same variants, only if AniList found nothing.
-   *  3) verifierCoherenceMalId as a last sanity gate on whatever matched.
-   * Cached for 7 days under slug (falls back to nomSerieBase if the site
-   * adapter has no slug concept — e.g. anime-sama.to). Returns null (and
-   * caches that null) if nothing resolved or the sanity check rejected it.
-   */
+  // Resolves a MyAnimeList ID for a series, in order of precedence:
+  //  0) OVERRIDES_MALID, keyed by slug.
+  //  1) AniList search across every genererVariantesRecherche variant.
+  //  2) Jikan search, same variants, only if AniList found nothing.
+  //  3) verifierCoherenceMalId as a sanity gate on the match.
+  // Cached 7 days under slug (falls back to nomSerieBase when the site
+  // adapter has no slug — e.g. anime-sama.to). Caches and returns null if
+  // nothing resolved or the sanity check rejected it.
   async function resoudreMalId(nomSerieBase, slug, urlRacine) {
     const cle = `${STORAGE_PREFIX_MALID}${slug || nomSerieBase}`;
     const cache = await storageGet([cle]);
@@ -352,16 +295,10 @@
     return malId;
   }
 
-  /**
-   * Single hop "this MAL id's TV sequel", via Jikan's /relations endpoint,
-   * cached 7 days per malId (same TTL/shape pattern as resoudreAniDbId).
-   * Confirmed live against Jikan: /v4/anime/40748/relations (Jujutsu
-   * Kaisen) returns a relation entry with relation: "Sequel" and
-   * entry: [{ mal_id: 51009, type: "anime", name: "Jujutsu Kaisen 2nd
-   * Season" }] — filtering entry by type "anime" matters because a
-   * relations list can also contain manga/other non-anime entries under
-   * different relation types (e.g. "Adaptation").
-   */
+  // Single hop "this MAL id's TV sequel" via Jikan's /relations endpoint,
+  // cached 7 days per malId. Filters entry by type "anime" since a
+  // relations list can also contain manga/other non-anime entries under
+  // different relation types (e.g. "Adaptation").
   async function resoudreSequelMalId(malId) {
     const cle = `${STORAGE_PREFIX_SEQUEL_MALID}${malId}`;
     const cache = await storageGet([cle]);
@@ -387,20 +324,12 @@
     return sequelMalId;
   }
 
-  /**
-   * Scrapes per-season episode counts straight off an anime's own root
-   * page on voiranime.rip (new) — e.g. ".../one-piece/" lists every
-   * season as a "Saison N" link next to a ".season-meta" chip reading
-   * "61 épisodes". Confirmed live for One Piece (12 saisons) and Jujutsu
-   * Kaisen (3 saisons); the scraped per-season counts summed to the
-   * page's own displayed total in both cases.
-   *
-   * Deliberately reads the WHOLE season list in one page fetch rather
-   * than one page per season: a viewer who jumps straight to Saison 7
-   * without ever visiting Saisons 1-6 still needs their episode counts
-   * to compute an absolute episode number (see resoudreMalIdEtEpisode),
-   * and this page already has all of them regardless of viewing order.
-   */
+  // Scrapes per-season episode counts off an anime's own root page on
+  // voiranime.rip — e.g. ".../one-piece/" lists each "Saison N" next to a
+  // ".season-meta" chip reading "61 épisodes". Reads the whole season
+  // list in one fetch (not one page per season) since a viewer jumping
+  // straight to Saison 7 still needs every prior season's count to
+  // compute an absolute episode number (see resoudreMalIdEtEpisode).
   async function scraperComptesEpisodesParSaison(urlRacine) {
     const reponse = await fetchAvecTimeout(urlRacine);
     if (!reponse.ok) throw new Error(`HTTP ${reponse.status}`);
@@ -422,15 +351,11 @@
     return comptes;
   }
 
-  /**
-   * Cached wrapper around scraperComptesEpisodesParSaison, per nomSerieBase.
-   * Re-scrapes when the cache doesn't yet cover saisonRequise (the site
-   * added a season since the last scrape) or has simply expired — same
-   * 7-day TTL as the other rarely-changing per-series caches. Falls back
-   * to a stale/incomplete cached value on scrape failure rather than
-   * nothing, since a stale season list is still very likely correct for
-   * every already-completed season.
-   */
+  // Cached wrapper around scraperComptesEpisodesParSaison, per
+  // nomSerieBase, 7-day TTL. Re-scrapes when the cache doesn't yet cover
+  // saisonRequise or has expired. Falls back to a stale/incomplete cached
+  // value on scrape failure rather than nothing, since already-completed
+  // seasons are still very likely correct.
   async function obtenirComptesEpisodesParSaison(nomSerieBase, urlRacine, saisonRequise) {
     const cle = `${STORAGE_PREFIX_SAISONS}${nomSerieBase}`;
     const cache = await storageGet([cle]);
@@ -455,30 +380,23 @@
     return entree?.comptes || null;
   }
 
-  /**
-   * Resolves the (malId, episode) pair to actually query AniSkip/OAT with
-   * for a given (nomSerieBase, saison, episodeSite) (new).
-   *
-   * Root cause this fixes: voiranime.rip resets its displayed episode
-   * number to 1 at the start of every "Saison". Two different franchise
-   * shapes need two different fixes:
-   *  1) Shows where each site season is its OWN separate MAL entry (e.g.
-   *     Jujutsu Kaisen Saison 2 = malId 51009, distinct from Saison 1's
-   *     40748): resolved by walking (saison - 1) "Sequel" relations from
-   *     the base malId — episodeSite is already correct as-is for that id.
-   *  2) Shows with a SINGLE continuous MAL entry across every site season
-   *     (confirmed live for One Piece: malId 21 the whole way, zero
-   *     "Sequel" relations at all) — MAL/AniSkip's episode numbers there
-   *     are absolute, so episodeSite needs converting: sum of every prior
-   *     season's episode count (scraped off the site itself) + episodeSite.
-   * Detection is automatic — case (2) is simply what happens when case
-   * (1)'s Sequel walk fails to find a next entry.
-   *
-   * Returns { malId: null, episode: null } if neither approach resolves
-   * cleanly. Deliberately never falls back to (malIdBase, episodeSite):
-   * that combination is exactly the wrong-episode-under-the-wrong-id bug
-   * this function exists to avoid reproducing.
-   */
+  // Resolves the (malId, episode) pair to actually query AniSkip/OAT
+  // with, for a given (nomSerieBase, saison, episodeSite).
+  //
+  // Root cause: voiranime.rip resets its displayed episode number to 1 at
+  // the start of every "Saison". Two franchise shapes need two fixes:
+  //  1) Each site season is its own MAL entry (e.g. Jujutsu Kaisen Saison
+  //     2 = malId 51009, distinct from Saison 1's 40748): walk
+  //     (saison - 1) "Sequel" relations from the base malId — episodeSite
+  //     is already correct as-is.
+  //  2) A single continuous MAL entry across every site season (confirmed
+  //     live for One Piece: malId 21 throughout, zero Sequel relations):
+  //     MAL/AniSkip's episode numbers are absolute, so episodeSite needs
+  //     the sum of every prior season's scraped episode count added in.
+  // Detection is automatic — case (2) is what happens when case (1)'s
+  // Sequel walk fails to find a next entry. Never falls back to
+  // (malIdBase, episodeSite): that pairing is exactly the
+  // wrong-episode-under-the-wrong-id bug this function avoids.
   async function resoudreMalIdEtEpisode(nomSerieBase, saison, episodeSite, obtenirUrlRacine) {
     const urlRacine = obtenirUrlRacine ? obtenirUrlRacine() : null;
     const slug = urlRacine ? urlRacine.replace(/\/$/, "").split("/").pop() : null;
@@ -518,9 +436,8 @@
     for (let s = 1; s < saison; s++) {
       const compteSaison = comptes[s];
       if (!Number.isFinite(compteSaison)) {
-        // Une saison intermédiaire manque dans les compteurs scrapés : la
-        // somme serait fausse (sous-estimée) — mieux vaut aucune donnée
-        // qu'un décalage silencieux, même léger.
+        // Une saison intermédiaire manque dans les compteurs scrapés :
+        // mieux vaut aucune donnée qu'un décalage silencieux.
         return { malId: null, episode: null };
       }
       episodeAbsolu += compteSaison;
